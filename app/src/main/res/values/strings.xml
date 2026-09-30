@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">YouTube Voice</string>
+    <string name="notification_channel_name">Воспроизведение</string>
+    <string name="notification_channel_desc">Управление аудиоплеером YouTube</string>
+    <string name="playing_notification">Идёт воспроизведение</string>
+</resources>
