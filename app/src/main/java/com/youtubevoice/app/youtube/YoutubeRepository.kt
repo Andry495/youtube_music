@@ -257,6 +257,10 @@ class YoutubeRepository(
         audioCache.remove(trackId)
     }
 
+    fun invalidateAll() {
+        audioCache.clear()
+    }
+
     fun isChannelUrl(url: String): Boolean {
         val lower = url.lowercase()
         return lower.contains("youtube.com/@") ||

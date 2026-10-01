@@ -23,13 +23,19 @@
 ### UI (`ui/`)
 
 - `PlayerScreen` — вкладки Player / Search / Library, очередь, now playing
-- `PlayerViewModel` — навигация, auth, очередь, MediaController
+- `PlayerViewModel` — навигация, auth, очередь, MediaController, сохранение/восстановление сессии
 
 ### Auth (`auth/`)
 
 - Выбор аккаунта через `AccountManager`
 - `YoutubeLoginActivity` — WebView, cookie-сессия
 - `YoutubeAccountAuth` — DataStore (`SAPISID` / `__Secure-3PAPISID`)
+
+### Плеер (`player/`)
+
+- `PlaybackService` — MediaSessionService, ExoPlayer, восстановление после смены сети / ошибки потока
+- `AudioCacheStore` — кэш Media3
+- `PlaybackStateStore` — DataStore: очередь, индекс трека, позиция, флаг «играло»
 
 ### Данные (`youtube/`)
 
@@ -41,11 +47,6 @@
 
 Резолв аудио: предпочтительно HLS; User-Agent потока должен совпадать с клиентом, выдавшим URL.
 
-### Плеер (`player/`)
-
-- `PlaybackService` — MediaSessionService, ExoPlayer на главном потоке
-- `AudioCacheStore` — кэш Media3
-
 ## Сценарии
 
 **Ссылка:** intent / поле ввода → `loadFromUrl` → очередь ExoPlayer → `resolveAudio`.
@@ -53,6 +54,10 @@
 **Библиотека:** cookie → `listMyPlaylists` → `loadPlaylistTracks` → очередь.
 
 **Поиск / канал:** NewPipe (+ InnerTube при необходимости).
+
+**Смена сети:** `ConnectivityManager` → invalidate URL cache → re-resolve → `seekTo` сохранённой позиции.
+
+**Перезапуск приложения:** `PlaybackStateStore` → `setPlaylist(..., startPositionMs)` без потери трека.
 
 ## Почему без YouTube Data API v3
 

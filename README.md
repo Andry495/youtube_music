@@ -2,7 +2,9 @@
 
 **YouTube Voice** — открытый Android-аудиоплеер для YouTube и YouTube Music: только звук, фон, уведомления, поиск, библиотека и плейлисты.
 
-Ключевые слова: `youtube audio player`, `android youtube music`, `background youtube audio`, `youtube playlist player`, `kotlin compose exoplayer`, `media3`, `newpipe`.
+Текущая версия: **1.1.0** (`versionCode` 2)
+
+Ключевые слова: `youtube audio player`, `android youtube music`, `background youtube audio`, `youtube playlist player`, `kotlin compose exoplayer`, `media3`, `newpipe`, `playback resume`, `network recovery`.
 
 > Исходники и APK — только на GitHub. В Google Play / RuStore **не публикуется**.
 
@@ -35,6 +37,8 @@
 - Свои плейлисты, подписки, лайк / дизлайк
 - Очередь, shuffle / repeat
 - Кэш аудиопотоков (Media3)
+- **Возобновление после смены сети** (Wi‑Fi ↔ мобильный интернет)
+- **Память позиции**: после закрытия приложения продолжает с того же трека и времени
 
 ---
 
@@ -42,12 +46,15 @@
 
 | Файл | Версия |
 |---|---|
-| [YouTubeVoice-1.0.0-debug.apk](releases/YouTubeVoice-1.0.0-debug.apk) | 1.0.0 (debug) |
+| [YouTubeVoice-1.1.0-debug.apk](releases/YouTubeVoice-1.1.0-debug.apk) | **1.1.0** (debug) |
+| [YouTubeVoice-1.0.0-debug.apk](releases/YouTubeVoice-1.0.0-debug.apk) | 1.0.0 (debug, архив) |
 
-Прямая ссылка:  
-https://github.com/Andry495/youtube_music/raw/main/releases/YouTubeVoice-1.0.0-debug.apk
+Прямая ссылка (актуальная):  
+https://github.com/Andry495/youtube_music/raw/main/releases/YouTubeVoice-1.1.0-debug.apk
 
 На Android 8+ разрешите установку из неизвестных источников. Это сборка из исходников, не магазинный релиз.
+
+История изменений: [CHANGELOG.md](CHANGELOG.md)
 
 ---
 
@@ -57,7 +64,7 @@ https://github.com/Andry495/youtube_music/raw/main/releases/YouTubeVoice-1.0.0-d
 |---|---|
 | UI | Kotlin, Jetpack Compose, Material 3 |
 | Плеер | Media3 ExoPlayer, HLS, MediaSessionService |
-| Сеть | OkHttp, DataStore |
+| Сеть | OkHttp, DataStore, ConnectivityManager |
 | Контент | InnerTube (cookie), [NewPipe Extractor](https://github.com/TeamNewPipe/NewPipeExtractor) |
 | Картинки | Coil |
 
@@ -78,6 +85,7 @@ CLI (Windows):
 
 ```bat
 gradlew.bat :app:assembleDebug
+gradlew.bat :app:installDebug
 ```
 
 Подробнее: [docs/BUILD.md](docs/BUILD.md) · архитектура: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
@@ -105,7 +113,7 @@ app/src/main/java/com/youtubevoice/app/
 ├── YoutubeVoiceApp.kt
 ├── auth/          # WebView-вход, cookie / DataStore
 ├── data/          # модели Track, Playlist, SearchHit
-├── player/        # ExoPlayer, MediaSession, кэш
+├── player/        # ExoPlayer, MediaSession, кэш, resume state
 ├── ui/            # Compose UI + ViewModel
 └── youtube/       # InnerTube + NewPipe
 ```
