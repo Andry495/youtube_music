@@ -102,7 +102,7 @@ app/build/outputs/apk/debug/app-debug.apk
 Готовый APK в репозитории (для скачивания без сборки):
 
 ```
-releases/YouTubeVoice-1.0.0-debug.apk
+releases/YouTubeVoice-1.1.0-debug.apk
 ```
 
 Чтобы обновить файл в `releases/` после изменений кода:

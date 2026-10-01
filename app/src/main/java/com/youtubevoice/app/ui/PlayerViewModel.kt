@@ -18,6 +18,8 @@ import com.youtubevoice.app.data.Subscription
 import com.youtubevoice.app.data.Track
 import com.youtubevoice.app.data.VideoRating
 import com.youtubevoice.app.player.PlaybackService
+import com.youtubevoice.app.player.PlaybackStateStore
+import com.youtubevoice.app.player.SavedPlayback
 import com.youtubevoice.app.youtube.NewPipeDownloader
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -29,6 +31,9 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
+import androidx.media3.common.util.UnstableApi
 
 data class PlayerUiState(
     val urlInput: String = "",
@@ -59,14 +64,19 @@ data class PlayerUiState(
     val showCreatePlaylist: Boolean = false
 )
 
+@OptIn(UnstableApi::class)
 class PlayerViewModel : ViewModel() {
     private val repository get() = YoutubeVoiceApp.instance.youtubeRepository
     private val auth get() = YoutubeVoiceApp.instance.googleAuth
     private val api get() = YoutubeVoiceApp.instance.youtubeLibraryApi
+    private val playbackStore by lazy { PlaybackStateStore(YoutubeVoiceApp.instance) }
 
     private var controller: MediaController? = null
     private var positionJob: Job? = null
     private var trackMetaJob: Job? = null
+    private var lastPersistAtMs = 0L
+    private var lastPlayingForPersist: Boolean? = null
+    private var restoreAttempted = false
 
     private val _uiState = MutableStateFlow(PlayerUiState())
     val uiState: StateFlow<PlayerUiState> = _uiState.asStateFlow()
@@ -74,6 +84,11 @@ class PlayerViewModel : ViewModel() {
     private val playerListener = object : Player.Listener {
         override fun onEvents(player: Player, events: Player.Events) {
             syncFromPlayer(player)
+            val playingChanged = events.contains(Player.EVENT_IS_PLAYING_CHANGED) ||
+                events.contains(Player.EVENT_PLAY_WHEN_READY_CHANGED)
+            if (playingChanged) {
+                persistPlayback(force = true)
+            }
         }
     }
 
@@ -90,6 +105,9 @@ class PlayerViewModel : ViewModel() {
         mediaController.addListener(playerListener)
         syncFromPlayer(mediaController)
         startPositionUpdates()
+        viewModelScope.launch {
+            restorePlaybackIfNeeded(mediaController)
+        }
     }
 
     fun detachController() {
@@ -681,15 +699,18 @@ class PlayerViewModel : ViewModel() {
         val c = controller ?: return
         if (c.isPlaying) {
             c.pause()
+            persistPlayback(force = true)
             return
         }
-        // Placeholder youtubevoice:// URIs can't play — resolve via service first
+        val uri = c.currentMediaItem?.localConfiguration?.uri
         val service = PlaybackService.instance
-        val index = c.currentMediaItemIndex
-        if (service != null && index >= 0) {
-            service.playTrackAt(index)
-        } else {
+        if (uri?.scheme == "youtubevoice" && service != null) {
+            service.resumeCurrent()
+        } else if (c.mediaItemCount > 0) {
             c.play()
+        } else {
+            // Cold start: try restoring saved session
+            viewModelScope.launch { restorePlaybackIfNeeded(c, force = true) }
         }
     }
 
@@ -817,12 +838,17 @@ class PlayerViewModel : ViewModel() {
         return cookie
     }
 
-    private fun waitForServiceAndPlay(tracks: List<Track>, startIndex: Int) {
+    private fun waitForServiceAndPlay(
+        tracks: List<Track>,
+        startIndex: Int,
+        startPositionMs: Long = 0L,
+        autoPlay: Boolean = true
+    ) {
         viewModelScope.launch {
             repeat(40) {
                 val service = PlaybackService.instance
                 if (service != null) {
-                    service.setPlaylist(tracks, startIndex, autoPlay = true)
+                    service.setPlaylist(tracks, startIndex, startPositionMs, autoPlay)
                     return@launch
                 }
                 delay(100)
@@ -833,9 +859,114 @@ class PlayerViewModel : ViewModel() {
         }
     }
 
+    private suspend fun restorePlaybackIfNeeded(player: MediaController, force: Boolean = false) {
+        if (restoreAttempted && !force) return
+        restoreAttempted = true
+
+        if (player.mediaItemCount > 0) {
+            hydrateUiFromActivePlayer(player)
+            return
+        }
+
+        val saved = withContext(Dispatchers.IO) { playbackStore.load() } ?: return
+        _uiState.update {
+            it.copy(
+                playlist = saved.playlist,
+                currentTrack = saved.playlist.tracks.getOrNull(saved.trackIndex)
+                    ?: saved.playlist.tracks.firstOrNull(),
+                positionMs = saved.positionMs,
+                mainTab = MainTab.PLAYER,
+                isLoading = false
+            )
+        }
+        waitForServiceAndPlay(
+            tracks = saved.playlist.tracks,
+            startIndex = saved.trackIndex,
+            startPositionMs = saved.positionMs,
+            autoPlay = saved.wasPlaying
+        )
+        saved.playlist.tracks.getOrNull(saved.trackIndex)?.let { refreshTrackMeta(it) }
+    }
+
+    private fun hydrateUiFromActivePlayer(player: MediaController) {
+        val serviceTracks = PlaybackService.instance?.snapshotTracks().orEmpty()
+        val tracks = if (serviceTracks.size == player.mediaItemCount && serviceTracks.isNotEmpty()) {
+            serviceTracks
+        } else {
+            tracksFromMediaItems(player)
+        }
+        if (tracks.isEmpty()) return
+        val index = player.currentMediaItemIndex.coerceIn(0, tracks.lastIndex)
+        val playlist = _uiState.value.playlist?.takeIf { it.tracks.size == tracks.size }
+            ?: PlaylistInfo(
+                id = "active",
+                title = "Сейчас играет",
+                uploader = tracks.getOrNull(index)?.artist.orEmpty(),
+                thumbnailUrl = tracks.getOrNull(index)?.thumbnailUrl,
+                tracks = tracks
+            )
+        _uiState.update {
+            it.copy(
+                playlist = playlist,
+                currentTrack = tracks[index],
+                positionMs = player.currentPosition.coerceAtLeast(0L),
+                durationMs = player.duration.takeIf { d -> d > 0 } ?: 0L,
+                isPlaying = player.isPlaying,
+                mainTab = MainTab.PLAYER
+            )
+        }
+    }
+
+    private fun tracksFromMediaItems(player: Player): List<Track> {
+        return buildList {
+            for (i in 0 until player.mediaItemCount) {
+                val item = player.getMediaItemAt(i)
+                add(trackFromMediaItem(item))
+            }
+        }
+    }
+
+    private fun trackFromMediaItem(item: MediaItem): Track {
+        val meta: MediaMetadata = item.mediaMetadata
+        val id = item.mediaId
+        return Track(
+            id = id,
+            title = meta.title?.toString().orEmpty().ifBlank { "Трек" },
+            artist = meta.artist?.toString().orEmpty(),
+            thumbnailUrl = meta.artworkUri?.toString(),
+            watchUrl = "https://www.youtube.com/watch?v=$id"
+        )
+    }
+
+    private fun persistPlayback(force: Boolean = false) {
+        val player = controller ?: return
+        val playlist = _uiState.value.playlist ?: return
+        if (playlist.tracks.isEmpty() || player.mediaItemCount <= 0) return
+
+        val now = System.currentTimeMillis()
+        val playing = player.isPlaying || player.playWhenReady
+        val playingChanged = lastPlayingForPersist != null && lastPlayingForPersist != playing
+        if (!force && !playingChanged && now - lastPersistAtMs < PERSIST_INTERVAL_MS) return
+        lastPersistAtMs = now
+        lastPlayingForPersist = playing
+
+        val index = player.currentMediaItemIndex.coerceIn(0, playlist.tracks.lastIndex)
+        val position = player.currentPosition.coerceAtLeast(0L)
+        val snapshot = SavedPlayback(
+            playlist = playlist,
+            trackIndex = index,
+            positionMs = position,
+            wasPlaying = playing
+        )
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { playbackStore.save(snapshot) }
+        }
+    }
+
     private fun syncFromPlayer(player: Player) {
         val mediaId = player.currentMediaItem?.mediaId
         val track = _uiState.value.playlist?.tracks?.firstOrNull { it.id == mediaId }
+            ?: player.currentMediaItem?.let { trackFromMediaItem(it) }
         val previousId = _uiState.value.currentTrack?.id
         _uiState.update {
             it.copy(
@@ -851,24 +982,29 @@ class PlayerViewModel : ViewModel() {
         if (newId != null && newId != previousId) {
             refreshTrackMeta(track)
         }
+        persistPlayback(force = false)
     }
 
     private fun startPositionUpdates() {
         positionJob?.cancel()
         positionJob = viewModelScope.launch {
             while (isActive) {
-                controller?.let { syncFromPlayer(it) }
+                controller?.let {
+                    syncFromPlayer(it)
+                }
                 delay(500)
             }
         }
     }
 
     override fun onCleared() {
+        persistPlayback(force = true)
         detachController()
         super.onCleared()
     }
 
     companion object {
         private const val MAX_PLAYLIST_TRACKS = 40
+        private const val PERSIST_INTERVAL_MS = 2_000L
     }
 }
