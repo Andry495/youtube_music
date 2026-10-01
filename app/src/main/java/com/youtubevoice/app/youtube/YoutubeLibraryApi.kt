@@ -6,29 +6,24 @@ import com.youtubevoice.app.data.ResolvedAudio
 import com.youtubevoice.app.data.Subscription
 import com.youtubevoice.app.data.Track
 import com.youtubevoice.app.data.VideoRating
+import com.youtubevoice.app.dpi.AppHttp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.security.MessageDigest
 import java.util.ArrayDeque
-import java.util.concurrent.TimeUnit
 
 /**
  * Authenticated YouTube library via InnerTube + cookie session (device Google login).
  * No Google Cloud OAuth / Data API client required.
  */
-class YoutubeLibraryApi(
-    private val client: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .build()
-) {
+class YoutubeLibraryApi {
     private val jsonMedia = "application/json; charset=utf-8".toMediaType()
+    private fun http() = AppHttp.client()
 
     // region Playlists
 
@@ -1121,7 +1116,7 @@ class YoutubeLibraryApi(
     }
 
     private fun clientHttp(request: Request): JSONObject {
-        client.newCall(request).execute().use { response ->
+        http().newCall(request).execute().use { response ->
             val text = response.body?.string().orEmpty()
             if (!response.isSuccessful) {
                 throw IllegalStateException(parseError(response.code, text))

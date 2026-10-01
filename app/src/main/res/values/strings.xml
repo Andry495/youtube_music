@@ -8,6 +8,7 @@
     <string name="dpi_channel_desc">Локальный обход DPI только для YouTube Voice</string>
     <string name="dpi_notification_title">DPI включён</string>
     <string name="dpi_notification_text">Трафик приложения идёт через локальный обход</string>
+    <string name="dpi_proxy_notification_text">Локальный SOCKS ByeDPI для этого приложения</string>
     <string name="dpi_notification_stop">Выключить</string>
-    <string name="dpi_property_desc">Локальный DPI-обход для YouTube Voice без удалённого VPN-сервера</string>
+    <string name="dpi_property_desc">Локальный DPI-прокси ByeDPI для YouTube Voice без удалённого VPN-сервера</string>
 </resources>

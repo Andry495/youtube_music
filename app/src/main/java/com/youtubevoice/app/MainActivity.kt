@@ -22,11 +22,11 @@ import androidx.media3.session.SessionToken
 import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.MoreExecutors
 import com.youtubevoice.app.auth.YoutubeLoginActivity
+import com.youtubevoice.app.dpi.DpiStatus
 import com.youtubevoice.app.player.PlaybackService
 import com.youtubevoice.app.ui.PlayerScreen
 import com.youtubevoice.app.ui.PlayerViewModel
 import com.youtubevoice.app.ui.theme.YoutubeVoiceTheme
-import android.net.VpnService
 
 @UnstableApi
 class MainActivity : ComponentActivity() {
@@ -36,15 +36,6 @@ class MainActivity : ComponentActivity() {
 
     private val notificationPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* no-op */ }
-
-    private val vpnPermissionLauncher =
-        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-            if (result.resultCode == RESULT_OK) {
-                viewModel.onVpnPermissionGranted()
-            } else {
-                viewModel.onVpnPermissionDenied()
-            }
-        }
 
     private val accountChooserLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -86,17 +77,11 @@ class MainActivity : ComponentActivity() {
                 }
 
                 LaunchedEffect(state.dpiEnabledPreference) {
-                    if (!state.dpiEnabledPreference) return@LaunchedEffect
-                    if (state.dpiStatus == com.youtubevoice.app.dpi.DpiStatus.Connected ||
-                        state.dpiStatus == com.youtubevoice.app.dpi.DpiStatus.Connecting
+                    if (state.dpiEnabledPreference &&
+                        state.dpiStatus != DpiStatus.Connected &&
+                        state.dpiStatus != DpiStatus.Connecting
                     ) {
-                        return@LaunchedEffect
-                    }
-                    val prepare = VpnService.prepare(this@MainActivity)
-                    if (prepare != null) {
-                        vpnPermissionLauncher.launch(prepare)
-                    } else {
-                        viewModel.onVpnPermissionGranted()
+                        viewModel.restoreDpiIfEnabled()
                     }
                 }
 
@@ -137,16 +122,7 @@ class MainActivity : ComponentActivity() {
                     onPlayChannelVideo = viewModel::playChannelVideo,
                     onConsumeMessage = viewModel::consumeMessage,
                     onShowSettings = viewModel::showSettings,
-                    onDpiEnabledChange = { enabled ->
-                        if (viewModel.setDpiEnabled(enabled)) {
-                            val prepare = VpnService.prepare(this@MainActivity)
-                            if (prepare != null) {
-                                vpnPermissionLauncher.launch(prepare)
-                            } else {
-                                viewModel.onVpnPermissionGranted()
-                            }
-                        }
-                    }
+                    onDpiEnabledChange = viewModel::setDpiEnabled
                 )
             }
         }

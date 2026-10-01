@@ -26,6 +26,7 @@ import androidx.media3.session.MediaSessionService
 import com.youtubevoice.app.MainActivity
 import com.youtubevoice.app.YoutubeVoiceApp
 import com.youtubevoice.app.data.Track
+import com.youtubevoice.app.dpi.AppHttp
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -38,6 +39,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import okhttp3.Call
 import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -76,30 +78,13 @@ class PlaybackService : MediaSessionService() {
         super.onCreate()
         instance = this
 
-        val okHttp = OkHttpClient.Builder()
-            .followRedirects(true)
-            .followSslRedirects(true)
-            .connectTimeout(30, TimeUnit.SECONDS)
-            .readTimeout(60, TimeUnit.SECONDS)
-            .retryOnConnectionFailure(true)
-            .addInterceptor { chain ->
-                val original = chain.request()
-                val url = original.url.toString()
-                val ua = streamUserAgents[url]
-                    ?: streamUserAgents.entries.firstOrNull { url.startsWith(it.key.take(120)) }?.value
-                    ?: userAgentForStreamUrl(url)
-                chain.proceed(
-                    original.newBuilder()
-                        .header("User-Agent", ua)
-                        .header("Referer", "https://www.youtube.com/")
-                        .header("Origin", "https://www.youtube.com")
-                        .build()
-                )
-            }
-            .build()
-        okHttpClient = okHttp
+        val mediaCallFactory = Call.Factory { request ->
+            val client = okHttpClient ?: mediaHttpClient().also { okHttpClient = it }
+            client.newCall(request)
+        }
+        okHttpClient = mediaHttpClient()
 
-        val upstreamFactory = OkHttpDataSource.Factory(okHttp)
+        val upstreamFactory = OkHttpDataSource.Factory(mediaCallFactory)
             .setUserAgent(ANDROID_UA)
 
         val cacheFactory = CacheDataSource.Factory()
@@ -358,6 +343,36 @@ class PlaybackService : MediaSessionService() {
         networkCallback = null
         val cm = getSystemService(ConnectivityManager::class.java) ?: return
         runCatching { cm.unregisterNetworkCallback(callback) }
+    }
+
+    private fun mediaHttpClient(): OkHttpClient {
+        return AppHttp.client().newBuilder()
+            .connectTimeout(30, TimeUnit.SECONDS)
+            .readTimeout(60, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(true)
+            .addInterceptor { chain ->
+                val original = chain.request()
+                val url = original.url.toString()
+                val ua = streamUserAgents[url]
+                    ?: streamUserAgents.entries.firstOrNull { url.startsWith(it.key.take(120)) }?.value
+                    ?: userAgentForStreamUrl(url)
+                chain.proceed(
+                    original.newBuilder()
+                        .header("User-Agent", ua)
+                        .header("Referer", "https://www.youtube.com/")
+                        .header("Origin", "https://www.youtube.com")
+                        .build()
+                )
+            }
+            .build()
+    }
+
+    /** Rebind OkHttp after DPI SOCKS toggle (evicts old sockets). */
+    fun reloadHttpClient() {
+        okHttpClient?.connectionPool?.evictAll()
+        okHttpClient?.dispatcher?.cancelAll()
+        okHttpClient = mediaHttpClient()
+        Log.i(TAG, "HTTP client reloaded (dpiProxy=${AppHttp.isDpiProxyEnabled()})")
     }
 
     private fun shouldForceRecover(): Boolean {
