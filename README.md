@@ -2,7 +2,7 @@
 
 **YouTube Voice** — открытый Android-аудиоплеер для YouTube и YouTube Music: только звук, фон, уведомления, поиск, библиотека и плейлисты.
 
-Текущая версия: **1.2.0** (`versionCode` 4)
+Текущая версия: **1.3.0** (`versionCode` 5)
 
 Ключевые слова: `youtube audio player`, `android youtube music`, `background youtube audio`, `youtube playlist player`, `kotlin compose exoplayer`, `media3`, `newpipe`, `playback resume`, `network recovery`, `audio cache`.
 
@@ -37,6 +37,7 @@
 - Свои плейлисты, подписки, лайк / дизлайк
 - Очередь, shuffle / repeat
 - Умный кэш: **текущий + 3 следующих** трека, лимит 64–256 МБ
+- **Локальный обход DPI** (настройки → тумблер; только трафик этого приложения)
 - **Возобновление после смены сети** (Wi‑Fi ↔ мобильный интернет)
 - **Память позиции**: после закрытия приложения продолжает с того же трека и времени
 
@@ -46,18 +47,19 @@
 
 | Файл | Версия |
 |---|---|
-| [YouTubeVoice-1.2.0-debug.apk](releases/YouTubeVoice-1.2.0-debug.apk) | **1.2.0** (debug) |
+| [YouTubeVoice-1.3.0-debug.apk](releases/YouTubeVoice-1.3.0-debug.apk) | **1.3.0** (debug) |
+| [YouTubeVoice-1.2.0-debug.apk](releases/YouTubeVoice-1.2.0-debug.apk) | 1.2.0 (debug, архив) |
 | [YouTubeVoice-1.1.1-debug.apk](releases/YouTubeVoice-1.1.1-debug.apk) | 1.1.1 (debug, архив) |
 | [YouTubeVoice-1.1.0-debug.apk](releases/YouTubeVoice-1.1.0-debug.apk) | 1.1.0 (debug, архив) |
 | [YouTubeVoice-1.0.0-debug.apk](releases/YouTubeVoice-1.0.0-debug.apk) | 1.0.0 (debug, архив) |
 
 Прямая ссылка (актуальная):  
-https://github.com/Andry495/youtube_music/raw/main/releases/YouTubeVoice-1.2.0-debug.apk
+https://github.com/Andry495/youtube_music/raw/main/releases/YouTubeVoice-1.3.0-debug.apk
 
 На Android 8+ разрешите установку из неизвестных источников. Это сборка из исходников, не магазинный релиз.
 
 История изменений: [CHANGELOG.md](CHANGELOG.md)  
-Если YouTube плохо работает без VPN: [docs/NETWORK.md](docs/NETWORK.md)
+Сеть / DPI: [docs/NETWORK.md](docs/NETWORK.md) · лицензии native: [NOTICE.md](NOTICE.md)
 
 ---
 ## Стек

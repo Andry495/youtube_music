@@ -12,6 +12,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -25,6 +26,7 @@ import com.youtubevoice.app.player.PlaybackService
 import com.youtubevoice.app.ui.PlayerScreen
 import com.youtubevoice.app.ui.PlayerViewModel
 import com.youtubevoice.app.ui.theme.YoutubeVoiceTheme
+import android.net.VpnService
 
 @UnstableApi
 class MainActivity : ComponentActivity() {
@@ -34,6 +36,15 @@ class MainActivity : ComponentActivity() {
 
     private val notificationPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* no-op */ }
+
+    private val vpnPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            if (result.resultCode == RESULT_OK) {
+                viewModel.onVpnPermissionGranted()
+            } else {
+                viewModel.onVpnPermissionDenied()
+            }
+        }
 
     private val accountChooserLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -74,6 +85,21 @@ class MainActivity : ComponentActivity() {
                     onDispose { releaseController() }
                 }
 
+                LaunchedEffect(state.dpiEnabledPreference) {
+                    if (!state.dpiEnabledPreference) return@LaunchedEffect
+                    if (state.dpiStatus == com.youtubevoice.app.dpi.DpiStatus.Connected ||
+                        state.dpiStatus == com.youtubevoice.app.dpi.DpiStatus.Connecting
+                    ) {
+                        return@LaunchedEffect
+                    }
+                    val prepare = VpnService.prepare(this@MainActivity)
+                    if (prepare != null) {
+                        vpnPermissionLauncher.launch(prepare)
+                    } else {
+                        viewModel.onVpnPermissionGranted()
+                    }
+                }
+
                 PlayerScreen(
                     state = state,
                     onUrlChange = viewModel::onUrlChange,
@@ -109,7 +135,18 @@ class MainActivity : ComponentActivity() {
                     onSelectChannelTab = viewModel::selectChannelTab,
                     onCloseChannel = viewModel::closeChannelPage,
                     onPlayChannelVideo = viewModel::playChannelVideo,
-                    onConsumeMessage = viewModel::consumeMessage
+                    onConsumeMessage = viewModel::consumeMessage,
+                    onShowSettings = viewModel::showSettings,
+                    onDpiEnabledChange = { enabled ->
+                        if (viewModel.setDpiEnabled(enabled)) {
+                            val prepare = VpnService.prepare(this@MainActivity)
+                            if (prepare != null) {
+                                vpnPermissionLauncher.launch(prepare)
+                            } else {
+                                viewModel.onVpnPermissionGranted()
+                            }
+                        }
+                    }
                 )
             }
         }

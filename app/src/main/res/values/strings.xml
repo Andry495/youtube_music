@@ -4,4 +4,10 @@
     <string name="notification_channel_name">Воспроизведение</string>
     <string name="notification_channel_desc">Управление аудиоплеером YouTube</string>
     <string name="playing_notification">Идёт воспроизведение</string>
+    <string name="dpi_channel_name">Обход DPI</string>
+    <string name="dpi_channel_desc">Локальный обход DPI только для YouTube Voice</string>
+    <string name="dpi_notification_title">DPI включён</string>
+    <string name="dpi_notification_text">Трафик приложения идёт через локальный обход</string>
+    <string name="dpi_notification_stop">Выключить</string>
+    <string name="dpi_property_desc">Локальный DPI-обход для YouTube Voice без удалённого VPN-сервера</string>
 </resources>

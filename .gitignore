@@ -15,3 +15,6 @@ app/build
 /_tmp/
 /build_log.txt
 *.log
+app/src/main/jniLibs/**/hev-socks5-tunnel-bin
+app/src/main/cpp/byedpi/.git
+app/src/main/jni/hev-socks5-tunnel/.git
