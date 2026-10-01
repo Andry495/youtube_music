@@ -109,5 +109,5 @@ releases/YouTubeVoice-1.1.0-debug.apk
 
 ```bat
 gradlew.bat :app:assembleDebug
-copy app\build\outputs\apk\debug\app-debug.apk releases\YouTubeVoice-1.0.0-debug.apk
+copy app\build\outputs\apk\debug\app-debug.apk releases\YouTubeVoice-1.1.0-debug.apk
 ```
