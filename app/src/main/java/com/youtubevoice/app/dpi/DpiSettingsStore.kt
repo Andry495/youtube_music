@@ -16,8 +16,8 @@ object DpiSettingsStore {
     const val PROXY_PORT = 1080
 
     /**
-     * YouTube/HTTPS oriented preset (Android = Linux stack).
-     * protect-path is appended at runtime by [DpiVpnService].
+     * YouTube/HTTPS oriented preset (Linux/Android stack).
+     * No --protect-path: we use SOCKS mode without VpnService.
      */
     val DEFAULT_ARGS: List<String> = listOf(
         "ciadpi",
@@ -26,6 +26,8 @@ object DpiSettingsStore {
         "--disorder", "1",
         "--auto=torst",
         "--tlsrec", "1+s",
+        "--fake", "-1",
+        "--ttl", "8",
     )
 
     fun enabledFlow(context: Context): Flow<Boolean> =

@@ -18,9 +18,9 @@ import com.youtubevoice.app.data.Subscription
 import com.youtubevoice.app.data.Track
 import com.youtubevoice.app.data.VideoRating
 import com.youtubevoice.app.dpi.DpiController
+import com.youtubevoice.app.dpi.DpiProxyService
 import com.youtubevoice.app.dpi.DpiSettingsStore
 import com.youtubevoice.app.dpi.DpiStatus
-import com.youtubevoice.app.dpi.DpiVpnService
 import com.youtubevoice.app.player.PlaybackService
 import com.youtubevoice.app.player.PlaybackStateStore
 import com.youtubevoice.app.player.SavedPlayback
@@ -121,48 +121,27 @@ class PlayerViewModel : ViewModel() {
         _uiState.update { it.copy(showSettings = show) }
     }
 
-    /**
-     * Persist toggle. When enabling, returns true so Activity runs VpnService.prepare().
-     */
-    fun setDpiEnabled(enabled: Boolean): Boolean {
+    /** Enable/disable local ByeDPI SOCKS proxy (no system VPN dialog). */
+    fun setDpiEnabled(enabled: Boolean) {
         val app = YoutubeVoiceApp.instance
         viewModelScope.launch {
             DpiSettingsStore.setEnabled(app, enabled)
         }
         _uiState.update { it.copy(dpiEnabledPreference = enabled) }
-        if (!enabled) {
-            DpiVpnService.stop(app)
-            return false
-        }
-        return true
-    }
-
-    fun onVpnPermissionGranted() {
-        DpiVpnService.start(YoutubeVoiceApp.instance)
-    }
-
-    fun onVpnPermissionDenied() {
-        viewModelScope.launch {
-            DpiSettingsStore.setEnabled(YoutubeVoiceApp.instance, false)
-        }
-        _uiState.update {
-            it.copy(
-                dpiEnabledPreference = false,
-                error = "Нужно разрешение VPN для локального обхода DPI"
-            )
+        if (enabled) {
+            DpiProxyService.start(app)
+        } else {
+            DpiProxyService.stop(app)
         }
     }
 
-    fun maybeStartDpiFromPreference(): android.content.Intent? {
-        val app = YoutubeVoiceApp.instance
-        if (!_uiState.value.dpiEnabledPreference) return null
-        if (DpiController.status.value == DpiStatus.Connected ||
-            DpiController.status.value == DpiStatus.Connecting
+    fun restoreDpiIfEnabled() {
+        if (_uiState.value.dpiEnabledPreference &&
+            DpiController.status.value != DpiStatus.Connected &&
+            DpiController.status.value != DpiStatus.Connecting
         ) {
-            return null
+            DpiProxyService.start(YoutubeVoiceApp.instance)
         }
-        // Caller (Activity) must use Activity context for prepare().
-        return android.net.VpnService.prepare(app)
     }
 
     fun attachController(mediaController: MediaController) {

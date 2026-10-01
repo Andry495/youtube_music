@@ -1,12 +1,11 @@
 package com.youtubevoice.app.youtube
 
-import okhttp3.OkHttpClient
+import com.youtubevoice.app.dpi.AppHttp
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.schabi.newpipe.extractor.downloader.Downloader
 import org.schabi.newpipe.extractor.downloader.Request
 import org.schabi.newpipe.extractor.downloader.Response
 import org.schabi.newpipe.extractor.exceptions.ReCaptchaException
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
 object NewPipeDownloader : Downloader() {
@@ -15,11 +14,6 @@ object NewPipeDownloader : Downloader() {
             "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
     private val cookieRef = AtomicReference<String?>(null)
-
-    private val client = OkHttpClient.Builder()
-        .readTimeout(30, TimeUnit.SECONDS)
-        .connectTimeout(30, TimeUnit.SECONDS)
-        .build()
 
     fun setAuthCookie(cookie: String?) {
         cookieRef.set(cookie?.takeIf { it.isNotBlank() })
@@ -52,7 +46,7 @@ object NewPipeDownloader : Downloader() {
             else -> builder.method(method, ByteArray(0).toRequestBody(null))
         }
 
-        val response = client.newCall(builder.build()).execute()
+        val response = AppHttp.client().newCall(builder.build()).execute()
         if (response.code == 429) {
             response.close()
             throw ReCaptchaException("reCaptcha Challenge requested", request.url())

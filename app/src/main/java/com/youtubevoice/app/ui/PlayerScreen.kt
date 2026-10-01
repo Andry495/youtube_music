@@ -1531,7 +1531,7 @@ private fun SettingsSheet(
                 fontWeight = FontWeight.SemiBold
             )
             Text(
-                text = "Локальный обход DPI только для YouTube Voice. Удалённый VPN-сервер не используется.",
+                text = "Локальный SOCKS-прокси ByeDPI только для YouTube Voice. Системный VPN и удалённый сервер не нужны.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

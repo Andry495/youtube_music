@@ -30,7 +30,6 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
-            <!-- Open YouTube links in this audio player -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -59,13 +58,9 @@
         </service>
 
         <service
-            android:name=".dpi.DpiVpnService"
+            android:name=".dpi.DpiProxyService"
             android:exported="false"
-            android:permission="android.permission.BIND_VPN_SERVICE"
             android:foregroundServiceType="specialUse">
-            <intent-filter>
-                <action android:name="android.net.VpnService" />
-            </intent-filter>
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="@string/dpi_property_desc" />
