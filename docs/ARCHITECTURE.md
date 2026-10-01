@@ -33,8 +33,8 @@
 
 ### Плеер (`player/`)
 
-- `PlaybackService` — MediaSessionService, ExoPlayer, восстановление после смены сети / ошибки потока
-- `AudioCacheStore` — кэш Media3
+- `PlaybackService` — MediaSessionService, ExoPlayer, сеть, prefetch **3** трека вперёд
+- `AudioCacheStore` — SimpleCache: лимит `min(256MB, max(64MB, 5% free))`, `retainOnly(current+3)`, ~10 МБ на prefetch-трек
 - `PlaybackStateStore` — DataStore: очередь, индекс трека, позиция, флаг «играло»
 
 ### Данные (`youtube/`)
@@ -58,6 +58,12 @@
 **Смена сети:** `ConnectivityManager` → invalidate URL cache → re-resolve → `seekTo` сохранённой позиции.
 
 **Перезапуск приложения:** `PlaybackStateStore` → `setPlaylist(..., startPositionMs)` без потери трека.
+
+**Кэш:** при смене трека/плейлиста `retainOnly` оставляет только current + до 3 следующих; LRU внутри динамического потолка.
+
+## Сеть / DPI
+
+Встроенного Zapret нет. См. [NETWORK.md](NETWORK.md).
 
 ## Почему без YouTube Data API v3
 

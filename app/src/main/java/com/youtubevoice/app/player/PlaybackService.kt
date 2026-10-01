@@ -149,8 +149,10 @@ class PlaybackService : MediaSessionService() {
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 mediaItem ?: return
                 errorRecoverAttempts.set(0)
-                ensureResolved(mediaItem, exoPlayer.currentMediaItemIndex)
-                prefetchAround(exoPlayer.currentMediaItemIndex)
+                val index = exoPlayer.currentMediaItemIndex
+                retainCacheWindow(index)
+                ensureResolved(mediaItem, index)
+                prefetchAround(index)
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
@@ -236,6 +238,15 @@ class PlaybackService : MediaSessionService() {
         prefetchJob?.cancel()
         tracks.forEach { trackIndex[it.id] = it }
 
+        val safeStartPreview = startIndex.coerceIn(0, (tracks.size - 1).coerceAtLeast(0))
+        val initialKeep = tracks
+            .drop(safeStartPreview)
+            .take(1 + PREFETCH_AHEAD)
+            .map { it.id }
+        serviceScope.launch(Dispatchers.IO) {
+            AudioCacheStore.retainOnly(initialKeep)
+        }
+
         serviceScope.launch {
             val safeStart = startIndex.coerceIn(0, (tracks.size - 1).coerceAtLeast(0))
             val mediaItems = tracks.map { buildPlaceholderMediaItem(it) }
@@ -272,6 +283,7 @@ class PlaybackService : MediaSessionService() {
                 ensureResolved(exo.getMediaItemAt(safeStart), safeStart)
                 exo.playWhenReady = true
             }
+            retainCacheWindow(safeStart)
             prefetchAround(safeStart)
         }
     }
@@ -430,6 +442,26 @@ class PlaybackService : MediaSessionService() {
         }
     }
 
+    private fun retainCacheWindow(centerIndex: Int) {
+        val exo = player ?: return
+        val last = exo.mediaItemCount - 1
+        if (last < 0) {
+            serviceScope.launch(Dispatchers.IO) { AudioCacheStore.retainOnly(emptyList()) }
+            return
+        }
+        val start = centerIndex.coerceIn(0, last)
+        val keep = LinkedHashSet<String>()
+        keep += exo.getMediaItemAt(start).mediaId
+        for (offset in 1..PREFETCH_AHEAD) {
+            val index = start + offset
+            if (index > last) break
+            keep += exo.getMediaItemAt(index).mediaId
+        }
+        serviceScope.launch(Dispatchers.IO) {
+            AudioCacheStore.retainOnly(keep)
+        }
+    }
+
     private fun prefetchAround(centerIndex: Int) {
         prefetchJob?.cancel()
         prefetchJob = serviceScope.launch {
@@ -437,6 +469,7 @@ class PlaybackService : MediaSessionService() {
                 val exo = player ?: return@withLock
                 val last = exo.mediaItemCount - 1
                 if (last < 0) return@withLock
+                retainCacheWindow(centerIndex)
                 for (offset in 1..PREFETCH_AHEAD) {
                     ensureActive()
                     val index = centerIndex + offset
@@ -480,6 +513,8 @@ class PlaybackService : MediaSessionService() {
             val dataSpec = DataSpec.Builder()
                 .setUri(streamUrl)
                 .setKey(trackId)
+                // Cap bytes per track so 3 ahead prefetches stay within the soft budget
+                .setLength(AudioCacheStore.PREFETCH_BYTES_PER_TRACK)
                 .build()
             CacheWriter(dataSource, dataSpec, /* temporaryBuffer */ null, /* progressListener */ null)
                 .cache()
@@ -560,7 +595,7 @@ class PlaybackService : MediaSessionService() {
 
     companion object {
         private const val TAG = "PlaybackService"
-        private const val PREFETCH_AHEAD = 1
+        private const val PREFETCH_AHEAD = 3
         private const val MAX_ERROR_RECOVERIES = 4
         private const val ANDROID_UA =
             "com.google.android.youtube/21.03.36 (Linux; U; Android 14) gzip"
