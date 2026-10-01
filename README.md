@@ -2,7 +2,7 @@
 
 **YouTube Voice** — открытый Android-аудиоплеер для YouTube и YouTube Music: только звук, фон, уведомления, поиск, библиотека и плейлисты.
 
-Текущая версия: **1.1.0** (`versionCode` 2)
+Текущая версия: **1.1.1** (`versionCode` 3)
 
 Ключевые слова: `youtube audio player`, `android youtube music`, `background youtube audio`, `youtube playlist player`, `kotlin compose exoplayer`, `media3`, `newpipe`, `playback resume`, `network recovery`.
 
@@ -46,11 +46,12 @@
 
 | Файл | Версия |
 |---|---|
-| [YouTubeVoice-1.1.0-debug.apk](releases/YouTubeVoice-1.1.0-debug.apk) | **1.1.0** (debug) |
+| [YouTubeVoice-1.1.1-debug.apk](releases/YouTubeVoice-1.1.1-debug.apk) | **1.1.1** (debug) |
+| [YouTubeVoice-1.1.0-debug.apk](releases/YouTubeVoice-1.1.0-debug.apk) | 1.1.0 (debug, архив) |
 | [YouTubeVoice-1.0.0-debug.apk](releases/YouTubeVoice-1.0.0-debug.apk) | 1.0.0 (debug, архив) |
 
 Прямая ссылка (актуальная):  
-https://github.com/Andry495/youtube_music/raw/main/releases/YouTubeVoice-1.1.0-debug.apk
+https://github.com/Andry495/youtube_music/raw/main/releases/YouTubeVoice-1.1.1-debug.apk
 
 На Android 8+ разрешите установку из неизвестных источников. Это сборка из исходников, не магазинный релиз.
 

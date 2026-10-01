@@ -316,18 +316,24 @@ class PlaybackService : MediaSessionService() {
             }
 
             override fun onAvailable(network: Network) {
-                if (!networkLost.getAndSet(false) && !shouldForceRecover()) return
-                Log.i(TAG, "Network available — recovering playback")
-                scheduleNetworkRecover()
+                // Connectivity callbacks run off the main thread — never touch ExoPlayer here.
+                val wasLost = networkLost.getAndSet(false)
+                serviceScope.launch {
+                    if (!wasLost && !shouldForceRecover()) return@launch
+                    Log.i(TAG, "Network available — recovering playback")
+                    scheduleNetworkRecover()
+                }
             }
 
             override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
                 if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) return
                 if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) return
-                if (!networkLost.get() && !shouldForceRecover()) return
-                networkLost.set(false)
-                Log.i(TAG, "Network validated — recovering playback")
-                scheduleNetworkRecover()
+                val wasLost = networkLost.getAndSet(false)
+                serviceScope.launch {
+                    if (!wasLost && !shouldForceRecover()) return@launch
+                    Log.i(TAG, "Network validated — recovering playback")
+                    scheduleNetworkRecover()
+                }
             }
         }
         networkCallback = callback
