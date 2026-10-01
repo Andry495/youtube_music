@@ -44,6 +44,7 @@ import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material.icons.filled.RepeatOne
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
@@ -76,6 +77,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRowDefaults
 import androidx.compose.material3.TabRowDefaults.PrimaryIndicator
@@ -114,6 +116,7 @@ import com.youtubevoice.app.data.SearchHit
 import com.youtubevoice.app.data.Subscription
 import com.youtubevoice.app.data.Track
 import com.youtubevoice.app.data.VideoRating
+import com.youtubevoice.app.dpi.DpiStatus
 import java.util.concurrent.TimeUnit
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -153,7 +156,9 @@ fun PlayerScreen(
     onSelectChannelTab: (ChannelBrowseTab) -> Unit,
     onCloseChannel: () -> Unit,
     onPlayChannelVideo: (Track) -> Unit,
-    onConsumeMessage: () -> Unit
+    onConsumeMessage: () -> Unit,
+    onShowSettings: (Boolean) -> Unit,
+    onDpiEnabledChange: (Boolean) -> Unit,
 ) {
     val snackbar = remember { SnackbarHostState() }
     val focusManager = LocalFocusManager.current
@@ -170,6 +175,14 @@ fun PlayerScreen(
         CreatePlaylistDialog(
             onDismiss = { onShowCreatePlaylist(false) },
             onConfirm = onCreatePlaylist
+        )
+    }
+    if (state.showSettings) {
+        SettingsSheet(
+            dpiEnabled = state.dpiEnabledPreference,
+            dpiStatus = state.dpiStatus,
+            onDpiEnabledChange = onDpiEnabledChange,
+            onDismiss = { onShowSettings(false) }
         )
     }
     if (state.showAddToPlaylist) {
@@ -217,6 +230,9 @@ fun PlayerScreen(
                     }
                 },
                 actions = {
+                    IconButton(onClick = { onShowSettings(true) }) {
+                        Icon(Icons.Default.Settings, contentDescription = "Настройки")
+                    }
                     if (state.isSignedIn) {
                         IconButton(onClick = onSignOut) {
                             Icon(Icons.Default.Logout, contentDescription = "Выйти")
@@ -1485,6 +1501,66 @@ private fun YoutubeUnderlineTabs(
                 selectedContentColor = MaterialTheme.colorScheme.onSurface,
                 unselectedContentColor = MaterialTheme.colorScheme.onSurfaceVariant
             )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SettingsSheet(
+    dpiEnabled: Boolean,
+    dpiStatus: DpiStatus,
+    onDpiEnabledChange: (Boolean) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 32.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text(
+                text = "Сеть",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                text = "Локальный обход DPI только для YouTube Voice. Удалённый VPN-сервер не используется.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Обход DPI",
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                    Text(
+                        text = when (dpiStatus) {
+                            DpiStatus.Disconnected -> "Выключен"
+                            DpiStatus.Connecting -> "Подключение…"
+                            DpiStatus.Connected -> "Активен"
+                            DpiStatus.Failed -> "Ошибка"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = dpiEnabled,
+                    onCheckedChange = onDpiEnabledChange
+                )
+            }
         }
     }
 }

@@ -36,6 +36,7 @@
 - `PlaybackService` — MediaSessionService, ExoPlayer, сеть, prefetch **3** трека вперёд
 - `AudioCacheStore` — SimpleCache: лимит `min(256MB, max(64MB, 5% free))`, `retainOnly(current+3)`, ~10 МБ на prefetch-трек
 - `PlaybackStateStore` — DataStore: очередь, индекс трека, позиция, флаг «играло»
+- `DpiVpnService` — локальный DPI (ByeDPI + hev), только `addAllowedApplication(свой пакет)`
 
 ### Данные (`youtube/`)
 
@@ -63,7 +64,7 @@
 
 ## Сеть / DPI
 
-Встроенного Zapret нет. См. [NETWORK.md](NETWORK.md).
+Встроенный локальный DPI с тумблером в настройках. См. [NETWORK.md](NETWORK.md).
 
 ## Почему без YouTube Data API v3
 
