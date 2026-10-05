@@ -43,11 +43,18 @@ class DpiProxyService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
-                scope.launch { startProxy() }
+                scope.launch { startProxy(forceRestart = false) }
+                return START_STICKY
+            }
+            ACTION_RESTART -> {
+                scope.launch { startProxy(forceRestart = true) }
                 return START_STICKY
             }
             ACTION_STOP -> {
-                scope.launch { stopProxy() }
+                scope.launch {
+                    runCatching { DpiSettingsStore.setEnabled(applicationContext, false) }
+                    stopProxy()
+                }
                 return START_NOT_STICKY
             }
             else -> return START_NOT_STICKY
@@ -56,13 +63,13 @@ class DpiProxyService : Service() {
 
     override fun onDestroy() {
         scope.cancel()
-        AppHttp.setDpiProxyEnabled(false)
+        AppHttp.setDpiModuleOff()
         PlaybackService.instance?.reloadHttpClient()
         super.onDestroy()
     }
 
-    private suspend fun startProxy() {
-        if (DpiController.status.value == DpiStatus.Connected) {
+    private suspend fun startProxy(forceRestart: Boolean) {
+        if (!forceRestart && DpiController.status.value == DpiStatus.Connected) {
             Log.w(TAG, "Already connected")
             return
         }
@@ -71,20 +78,29 @@ class DpiProxyService : Service() {
             mutex.withLock {
                 ensureNotificationChannel()
                 startForegroundCompat()
+                if (forceRestart || proxyJob != null || proxyFd >= 0) {
+                    stopping = true
+                    try {
+                        stopByeDpi()
+                    } finally {
+                        stopping = false
+                    }
+                    delay(150)
+                }
                 startByeDpi()
                 // Let the listen/event loop settle before clients connect
                 delay(250)
-                AppHttp.setDpiProxyEnabled(true)
+                AppHttp.setDpiSocksMode()
                 PlaybackService.instance?.reloadHttpClient()
             }
             DpiController.setStatus(DpiStatus.Connected)
             Log.i(TAG, "ByeDPI SOCKS proxy connected on 127.0.0.1:${DpiSettingsStore.PROXY_PORT}")
         } catch (t: Throwable) {
             Log.e(TAG, "Failed to start ByeDPI proxy", t)
-            AppHttp.setDpiProxyEnabled(false)
+            AppHttp.setDpiModuleOff()
             PlaybackService.instance?.reloadHttpClient()
             DpiController.setStatus(DpiStatus.Failed)
-            stopProxy()
+            scope.launch { stopProxy() }
         }
     }
 
@@ -92,7 +108,7 @@ class DpiProxyService : Service() {
         mutex.withLock {
             stopping = true
             try {
-                AppHttp.setDpiProxyEnabled(false)
+                AppHttp.setDpiModuleOff()
                 PlaybackService.instance?.reloadHttpClient()
                 stopByeDpi()
             } catch (t: Throwable) {
@@ -109,7 +125,8 @@ class DpiProxyService : Service() {
     private fun startByeDpi() {
         if (proxyJob != null) throw IllegalStateException("proxy already running")
 
-        val args = DpiSettingsStore.DEFAULT_ARGS.toTypedArray()
+        DpiFakeAssets.ensure(this)
+        val args = DpiFakeAssets.resolveArgs(DpiSettingsStore.currentArgs()).toTypedArray()
         Log.i(TAG, "Starting ByeDPI: ${args.joinToString(" ")}")
         val fd = ByeDpiNative.jniCreateSocketWithCommandLine(args)
         if (fd < 0) throw IllegalStateException("ByeDPI listen failed: $fd")
@@ -196,10 +213,20 @@ class DpiProxyService : Service() {
         private const val NOTIFICATION_ID = 43
 
         const val ACTION_START = "com.youtubevoice.app.dpi.PROXY_START"
+        const val ACTION_RESTART = "com.youtubevoice.app.dpi.PROXY_RESTART"
         const val ACTION_STOP = "com.youtubevoice.app.dpi.PROXY_STOP"
 
         fun start(context: Context) {
             val intent = Intent(context, DpiProxyService::class.java).setAction(ACTION_START)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
+        }
+
+        fun restart(context: Context) {
+            val intent = Intent(context, DpiProxyService::class.java).setAction(ACTION_RESTART)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
             } else {

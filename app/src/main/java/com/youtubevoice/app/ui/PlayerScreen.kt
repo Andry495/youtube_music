@@ -22,10 +22,12 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Add
@@ -55,11 +57,15 @@ import androidx.compose.material.icons.outlined.MusicNote
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.VideoLibrary
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilledTonalIconButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -69,6 +75,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.PrimaryTabRow
@@ -117,6 +124,10 @@ import com.youtubevoice.app.data.Subscription
 import com.youtubevoice.app.data.Track
 import com.youtubevoice.app.data.VideoRating
 import com.youtubevoice.app.dpi.DpiStatus
+import com.youtubevoice.app.player.CacheEvictionMode
+import com.youtubevoice.app.player.CachePrefetchOrder
+import com.youtubevoice.app.player.CacheSettings
+import com.youtubevoice.app.player.CacheSettingsStore
 import java.util.concurrent.TimeUnit
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -159,6 +170,9 @@ fun PlayerScreen(
     onConsumeMessage: () -> Unit,
     onShowSettings: (Boolean) -> Unit,
     onDpiEnabledChange: (Boolean) -> Unit,
+    onDpiAutoTune: () -> Unit,
+    onCacheSettingsChange: ((CacheSettings) -> CacheSettings) -> Unit,
+    onClearAudioCache: () -> Unit,
 ) {
     val snackbar = remember { SnackbarHostState() }
     val focusManager = LocalFocusManager.current
@@ -181,7 +195,15 @@ fun PlayerScreen(
         SettingsSheet(
             dpiEnabled = state.dpiEnabledPreference,
             dpiStatus = state.dpiStatus,
+            dpiPresetTitle = state.dpiPresetTitle,
+            dpiTuneRunning = state.dpiTuneRunning,
+            dpiTuneMessage = state.dpiTuneMessage,
+            cacheSettings = state.cacheSettings,
+            cacheStats = state.cacheStats,
             onDpiEnabledChange = onDpiEnabledChange,
+            onDpiAutoTune = onDpiAutoTune,
+            onCacheSettingsChange = onCacheSettingsChange,
+            onClearAudioCache = onClearAudioCache,
             onDismiss = { onShowSettings(false) }
         )
     }
@@ -668,13 +690,34 @@ private fun NowPlayingPanel(
 
             val duration = state.durationMs.coerceAtLeast(0L)
             val position = state.positionMs.coerceIn(0L, duration.takeIf { it > 0 } ?: state.positionMs)
-            Slider(
-                value = if (duration > 0) position.toFloat() / duration else 0f,
-                onValueChange = { ratio ->
-                    if (duration > 0) onSeek((ratio * duration).toLong())
-                },
-                modifier = Modifier.fillMaxWidth()
-            )
+            val buffered = state.cacheStats.bufferedPositionMs
+                .coerceIn(0L, duration.takeIf { it > 0 } ?: state.cacheStats.bufferedPositionMs)
+            val playRatio = if (duration > 0) position.toFloat() / duration else 0f
+            val bufferRatio = if (duration > 0) buffered.toFloat() / duration else 0f
+
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 4.dp),
+                contentAlignment = Alignment.CenterStart
+            ) {
+                LinearProgressIndicator(
+                    progress = { bufferRatio.coerceIn(0f, 1f) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(4.dp)
+                        .padding(horizontal = 8.dp),
+                    color = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.55f),
+                    trackColor = MaterialTheme.colorScheme.surfaceVariant,
+                )
+                Slider(
+                    value = playRatio.coerceIn(0f, 1f),
+                    onValueChange = { ratio ->
+                        if (duration > 0) onSeek((ratio * duration).toLong())
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween
@@ -685,9 +728,36 @@ private fun NowPlayingPanel(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Text(
+                    text = "буфер ${formatTime(buffered)}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.tertiary
+                )
+                Text(
                     text = formatTime(duration),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (state.currentTrack != null || state.cacheStats.totalBytes > 0L) {
+                val stats = state.cacheStats
+                Text(
+                    text = buildString {
+                        append("Кэш трека ${stats.trackMbLabel} МБ")
+                        if (stats.trackKeys > 0) append(" · ${stats.trackKeys} сегм.")
+                        append(" · всего ${stats.totalMbLabel}/${stats.maxMbLabel} МБ")
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 2.dp)
+                )
+                LinearProgressIndicator(
+                    progress = { stats.diskFill },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 4.dp)
+                        .height(3.dp),
+                    color = MaterialTheme.colorScheme.secondary,
+                    trackColor = MaterialTheme.colorScheme.surfaceVariant,
                 )
             }
 
@@ -774,18 +844,31 @@ private fun MiniPlayerBar(
     } else {
         0f
     }
+    val buffered = if (durationSafe > 0) {
+        (state.cacheStats.bufferedPositionMs.toFloat() / durationSafe).coerceIn(0f, 1f)
+    } else {
+        0f
+    }
 
     Surface(
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
         tonalElevation = 2.dp
     ) {
         Column {
-            LinearProgressIndicator(
-                progress = { progress.coerceIn(0f, 1f) },
-                modifier = Modifier.fillMaxWidth().height(2.dp),
-                color = MaterialTheme.colorScheme.primary,
-                trackColor = MaterialTheme.colorScheme.surfaceVariant
-            )
+            Box(modifier = Modifier.fillMaxWidth().height(3.dp)) {
+                LinearProgressIndicator(
+                    progress = { buffered },
+                    modifier = Modifier.fillMaxWidth().height(3.dp),
+                    color = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.5f),
+                    trackColor = MaterialTheme.colorScheme.surfaceVariant
+                )
+                LinearProgressIndicator(
+                    progress = { progress.coerceIn(0f, 1f) },
+                    modifier = Modifier.fillMaxWidth().height(3.dp),
+                    color = MaterialTheme.colorScheme.primary,
+                    trackColor = Color.Transparent
+                )
+            }
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1505,22 +1588,33 @@ private fun YoutubeUnderlineTabs(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 private fun SettingsSheet(
     dpiEnabled: Boolean,
     dpiStatus: DpiStatus,
+    dpiPresetTitle: String,
+    dpiTuneRunning: Boolean,
+    dpiTuneMessage: String,
+    cacheSettings: CacheSettings,
+    cacheStats: CacheUiStats,
     onDpiEnabledChange: (Boolean) -> Unit,
+    onDpiAutoTune: () -> Unit,
+    onCacheSettingsChange: ((CacheSettings) -> CacheSettings) -> Unit,
+    onClearAudioCache: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(
-        onDismissRequest = onDismiss,
+        onDismissRequest = {
+            if (!dpiTuneRunning) onDismiss()
+        },
         sheetState = sheetState
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 32.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -1531,7 +1625,7 @@ private fun SettingsSheet(
                 fontWeight = FontWeight.SemiBold
             )
             Text(
-                text = "Локальный SOCKS-прокси ByeDPI только для YouTube Voice. Системный VPN и удалённый сервер не нужны.",
+                text = "Встроенный обход DPI: трафик приложения → локальный TUN → ByeDPI (без удалённого VPN-сервера). Система спросит разрешение на локальный туннель — это не подписка на внешний VPN. Отдельный VPN пользователь включает сам при необходимости.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -1542,14 +1636,14 @@ private fun SettingsSheet(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "Обход DPI",
+                        text = "Обход DPI (встроенный)",
                         style = MaterialTheme.typography.titleMedium
                     )
                     Text(
                         text = when (dpiStatus) {
-                            DpiStatus.Disconnected -> "Выключен"
+                            DpiStatus.Disconnected -> "Выключен — трафик идёт как в системе (VPN телефона / Wi‑Fi)"
                             DpiStatus.Connecting -> "Подключение…"
-                            DpiStatus.Connected -> "Активен"
+                            DpiStatus.Connected -> "Активен (свой TUN, не VPN телефона)"
                             DpiStatus.Failed -> "Ошибка"
                         },
                         style = MaterialTheme.typography.bodySmall,
@@ -1558,7 +1652,250 @@ private fun SettingsSheet(
                 }
                 Switch(
                     checked = dpiEnabled,
-                    onCheckedChange = onDpiEnabledChange
+                    onCheckedChange = onDpiEnabledChange,
+                    enabled = !dpiTuneRunning
+                )
+            }
+            Text(
+                text = "Отдельный модуль. С VPN телефона не совмещается: включение встроенного DPI отключит системный VPN. Если YouTube уже открывается через VPN телефона — оставьте выключенным.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Text(
+                    text = "Сохранённый пресет",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = dpiPresetTitle.ifBlank { "Ещё не подобран" },
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    text = "Используется при включённом обходе DPI. Сменить можно только новым тестом.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            Button(
+                onClick = onDpiAutoTune,
+                enabled = !dpiTuneRunning,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    if (dpiTuneRunning) {
+                        "Тестирование…"
+                    } else {
+                        "Тест и подбор пресета"
+                    }
+                )
+            }
+            if (dpiTuneRunning) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
+            if (dpiTuneMessage.isNotBlank()) {
+                Text(
+                    text = dpiTuneMessage,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+
+            Text(
+                text = "Кэш аудио",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.SemiBold
+            )
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Text(
+                    text = "Занято ${cacheStats.totalMbLabel} / ${cacheStats.maxMbLabel} МБ · ${cacheStats.totalKeys} ключей",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold
+                )
+                LinearProgressIndicator(
+                    progress = { cacheStats.diskFill },
+                    modifier = Modifier.fillMaxWidth().height(6.dp),
+                    color = MaterialTheme.colorScheme.primary,
+                    trackColor = MaterialTheme.colorScheme.surface,
+                )
+                Text(
+                    text = buildString {
+                        append("Текущий трек: ${cacheStats.trackMbLabel} МБ")
+                        if (cacheStats.trackKeys > 0) append(" (${cacheStats.trackKeys} сегм.)")
+                        if (cacheStats.bufferedPositionMs > 0L) {
+                            append(" · буфер до ${formatTime(cacheStats.bufferedPositionMs)}")
+                        }
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Text(
+                text = "Пока играет (в т.ч. в фоне) текущий трек докачивается целиком в кэш; соседние — по лимиту МБ ниже. Порядок задаёт, кого греть первым.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            SettingsChipGroup(
+                title = "Макс. размер кэша",
+                options = CacheSettingsStore.MAX_MB_OPTIONS.map { it to "$it МБ" },
+                selected = cacheSettings.maxCacheMb,
+                onSelect = { mb -> onCacheSettingsChange { it.copy(maxCacheMb = mb) } }
+            )
+            SettingsChipGroup(
+                title = "Предзагрузка вперёд",
+                options = CacheSettingsStore.PREFETCH_AHEAD_OPTIONS.map { it to "$it" },
+                selected = cacheSettings.prefetchAhead,
+                onSelect = { n -> onCacheSettingsChange { it.copy(prefetchAhead = n) } }
+            )
+            SettingsChipGroup(
+                title = "Предзагрузка назад",
+                options = CacheSettingsStore.PREFETCH_BEHIND_OPTIONS.map { it to "$it" },
+                selected = cacheSettings.prefetchBehind,
+                onSelect = { n -> onCacheSettingsChange { it.copy(prefetchBehind = n) } }
+            )
+            SettingsChipGroup(
+                title = "МБ на соседний трек",
+                options = CacheSettingsStore.PREFETCH_MB_OPTIONS.map { it to "$it МБ" },
+                selected = cacheSettings.prefetchMbPerTrack,
+                onSelect = { mb -> onCacheSettingsChange { it.copy(prefetchMbPerTrack = mb) } }
+            )
+
+            Text(
+                text = "Вытеснение",
+                style = MaterialTheme.typography.titleMedium
+            )
+            Text(
+                text = when (cacheSettings.evictionMode) {
+                    CacheEvictionMode.WINDOW -> "Только окно плейлиста — вне окна удаляется сразу"
+                    CacheEvictionMode.LRU -> "Только по размеру (LRU) — окно не обрезает кэш"
+                    CacheEvictionMode.WINDOW_AND_LRU -> "Окно + LRU — и обрезка окна, и лимит размера"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                FilterChip(
+                    selected = cacheSettings.evictionMode == CacheEvictionMode.WINDOW,
+                    onClick = {
+                        onCacheSettingsChange { it.copy(evictionMode = CacheEvictionMode.WINDOW) }
+                    },
+                    label = { Text("Окно") }
+                )
+                FilterChip(
+                    selected = cacheSettings.evictionMode == CacheEvictionMode.LRU,
+                    onClick = {
+                        onCacheSettingsChange { it.copy(evictionMode = CacheEvictionMode.LRU) }
+                    },
+                    label = { Text("LRU") }
+                )
+                FilterChip(
+                    selected = cacheSettings.evictionMode == CacheEvictionMode.WINDOW_AND_LRU,
+                    onClick = {
+                        onCacheSettingsChange {
+                            it.copy(evictionMode = CacheEvictionMode.WINDOW_AND_LRU)
+                        }
+                    },
+                    label = { Text("Окно + LRU") }
+                )
+            }
+
+            Text(
+                text = "Порядок загрузки и хранения",
+                style = MaterialTheme.typography.titleMedium
+            )
+            Text(
+                text = when (cacheSettings.prefetchOrder) {
+                    CachePrefetchOrder.AHEAD -> "Сначала следующие треки"
+                    CachePrefetchOrder.CURRENT_THEN_AHEAD -> "Сначала текущий, затем следующие"
+                    CachePrefetchOrder.AROUND -> "Вокруг текущего: назад и вперёд"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                FilterChip(
+                    selected = cacheSettings.prefetchOrder == CachePrefetchOrder.AHEAD,
+                    onClick = {
+                        onCacheSettingsChange { it.copy(prefetchOrder = CachePrefetchOrder.AHEAD) }
+                    },
+                    label = { Text("Вперёд") }
+                )
+                FilterChip(
+                    selected = cacheSettings.prefetchOrder == CachePrefetchOrder.CURRENT_THEN_AHEAD,
+                    onClick = {
+                        onCacheSettingsChange {
+                            it.copy(prefetchOrder = CachePrefetchOrder.CURRENT_THEN_AHEAD)
+                        }
+                    },
+                    label = { Text("Текущий → вперёд") }
+                )
+                FilterChip(
+                    selected = cacheSettings.prefetchOrder == CachePrefetchOrder.AROUND,
+                    onClick = {
+                        onCacheSettingsChange { it.copy(prefetchOrder = CachePrefetchOrder.AROUND) }
+                    },
+                    label = { Text("Вокруг") }
+                )
+            }
+
+            OutlinedButton(
+                onClick = onClearAudioCache,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Очистить кэш аудио")
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun SettingsChipGroup(
+    title: String,
+    options: List<Pair<Int, String>>,
+    selected: Int,
+    onSelect: (Int) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.titleMedium
+        )
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            options.forEach { (value, label) ->
+                FilterChip(
+                    selected = selected == value,
+                    onClick = { onSelect(value) },
+                    label = { Text(label) }
                 )
             }
         }

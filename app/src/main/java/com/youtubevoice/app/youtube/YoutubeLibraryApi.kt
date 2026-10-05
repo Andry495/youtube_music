@@ -68,7 +68,7 @@ class YoutubeLibraryApi {
                         title = title,
                         itemCount = extractItemCount(obj),
                         thumbnailUrl = extractThumb(obj) ?: extractThumbFromLockup(obj),
-                        url = "https://www.youtube.com/playlist?list=$playlistId"
+                        url = "https://youtube.com/playlist?list=$playlistId"
                     )
                 }
             }
@@ -187,7 +187,7 @@ class YoutubeLibraryApi {
             title = title,
             itemCount = itemCount,
             thumbnailUrl = extractThumb(lockup) ?: extractThumbFromLockup(lockup),
-            url = "https://www.youtube.com/playlist?list=$rawId"
+            url = "https://youtube.com/playlist?list=$rawId"
         )
     }
 
@@ -427,7 +427,7 @@ class YoutubeLibraryApi {
                                 ?: extractText(r.opt("shortBylineText"))
                                 ?: "",
                             thumbnailUrl = extractThumb(r),
-                            watchUrl = "https://www.youtube.com/watch?v=$id",
+                            watchUrl = "https://youtube.com/watch?v=$id",
                             channelId = extractChannelId(r)
                         )
                     }
@@ -557,7 +557,7 @@ class YoutubeLibraryApi {
                             ?.opt("text")
                     ).orEmpty(),
                     thumbnailUrl = extractThumb(lockup),
-                    watchUrl = "https://www.youtube.com/watch?v=$videoId",
+                    watchUrl = "https://youtube.com/watch?v=$videoId",
                     durationSeconds = 0L,
                     channelId = null,
                     playlistItemId = null
@@ -647,7 +647,7 @@ class YoutubeLibraryApi {
                     ?: extractText(renderer.opt("ownerText"))
                     ?: "",
                 thumbnailUrl = extractThumb(renderer),
-                watchUrl = "https://www.youtube.com/watch?v=$videoId",
+                watchUrl = "https://youtube.com/watch?v=$videoId",
                 durationSeconds = parseDuration(extractText(renderer.opt("lengthText"))),
                 channelId = extractChannelId(renderer),
                 playlistItemId = renderer.optString("setVideoId").ifBlank { null }
@@ -856,6 +856,91 @@ class YoutubeLibraryApi {
                     found
                 }
         }
+
+    /**
+     * Resolve playable stream + basic metadata via InnerTube (googleapis),
+     * avoiding youtube.com HTML which DPI often breaks.
+     */
+    fun loadPlayableVideo(videoId: String, cookie: String? = null): Pair<Track, ResolvedAudio> {
+        val id = videoId.trim().substringAfter("v=").substringBefore("&").substringBefore("?")
+        require(id.length == 11) { "Некорректный videoId: $videoId" }
+
+        val payload = JSONObject()
+            .put("videoId", id)
+            .put("contentCheckOk", true)
+            .put("racyCheckOk", true)
+            .put(
+                "playbackContext",
+                JSONObject().put(
+                    "contentPlaybackContext",
+                    JSONObject().put("html5Preference", "HTML5_PREF_WANTS")
+                )
+            )
+
+        val visitor = fetchVisitorData()
+        val attempts = mutableListOf<Pair<ClientType, () -> JSONObject>>()
+        attempts += ClientType.VISIONOS to {
+            innertubeGuestPlayer(payload, ClientType.VISIONOS, visitor)
+        }
+        if (!cookie.isNullOrBlank()) {
+            attempts += ClientType.VISIONOS to {
+                innertube("player", cookie, payload, client = ClientType.VISIONOS)
+            }
+            attempts += ClientType.IOS to {
+                innertube("player", cookie, payload, client = ClientType.IOS)
+            }
+        }
+        attempts += ClientType.IOS to {
+            innertubeGuestPlayer(payload, ClientType.IOS, visitor)
+        }
+
+        var lastError: Throwable? = null
+        for ((client, fetch) in attempts) {
+            try {
+                val json = fetch()
+                val status = json.optJSONObject("playabilityStatus")?.optString("status").orEmpty()
+                if (status != "OK") {
+                    val reason = json.optJSONObject("playabilityStatus")
+                        ?.optString("reason")
+                        ?.ifBlank { null }
+                        ?: status
+                    lastError = IllegalStateException("$client: $reason")
+                    continue
+                }
+                val details = json.optJSONObject("videoDetails")
+                val resolved = pickStream(json, id, client, hlsOnly = true)
+                    ?: pickStream(json, id, client, hlsOnly = false)
+                    ?: run {
+                        lastError = IllegalStateException("$client: нет аудио URL")
+                        null
+                    }
+                    ?: continue
+                val thumbs = details?.optJSONObject("thumbnail")?.optJSONArray("thumbnails")
+                var thumb: String? = null
+                if (thumbs != null) {
+                    for (i in 0 until thumbs.length()) {
+                        thumb = thumbs.optJSONObject(i)?.optString("url")?.ifBlank { null } ?: thumb
+                    }
+                }
+                val track = Track(
+                    id = id,
+                    title = details?.optString("title").orEmpty().ifBlank { id },
+                    artist = details?.optString("author").orEmpty().ifBlank { "YouTube" },
+                    thumbnailUrl = thumb,
+                    watchUrl = "https://youtube.com/watch?v=$id",
+                    durationSeconds = details?.optString("lengthSeconds")?.toLongOrNull() ?: 0L,
+                    channelId = details?.optString("channelId")?.ifBlank { null }
+                )
+                return track to resolved
+            } catch (t: Throwable) {
+                lastError = t
+            }
+        }
+        throw IllegalStateException(
+            "Не удалось открыть видео $id: ${lastError?.message}",
+            lastError
+        )
+    }
 
     /**
      * Resolve a playable audio/media URL.
@@ -1391,7 +1476,8 @@ class YoutubeLibraryApi {
 
     companion object {
         private const val ORIGIN = "https://www.youtube.com"
-        private const val INNERTUBE_BASE = "https://www.youtube.com/youtubei/v1"
+        // www.youtube.com SNI is DPI-blocked on many RU ISPs; googleapis endpoint is not.
+        private const val INNERTUBE_BASE = "https://youtubei.googleapis.com/youtubei/v1"
         private const val CLIENT_VERSION = "2.20260120.01.00"
         private const val WEB_API_KEY = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
         private const val ANDROID_API_KEY = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vzqGEJrZs"

@@ -17,10 +17,19 @@ import com.youtubevoice.app.data.SearchHit
 import com.youtubevoice.app.data.Subscription
 import com.youtubevoice.app.data.Track
 import com.youtubevoice.app.data.VideoRating
+import com.youtubevoice.app.dpi.AppHttp
+import com.youtubevoice.app.dpi.DpiAutoTune
 import com.youtubevoice.app.dpi.DpiController
-import com.youtubevoice.app.dpi.DpiProxyService
+import com.youtubevoice.app.dpi.DpiPresets
+import com.youtubevoice.app.dpi.DpiLauncher
 import com.youtubevoice.app.dpi.DpiSettingsStore
 import com.youtubevoice.app.dpi.DpiStatus
+import com.youtubevoice.app.dpi.SystemVpn
+import com.youtubevoice.app.player.AudioCacheStore
+import com.youtubevoice.app.player.CacheEvictionMode
+import com.youtubevoice.app.player.CachePrefetchOrder
+import com.youtubevoice.app.player.CacheSettings
+import com.youtubevoice.app.player.CacheSettingsStore
 import com.youtubevoice.app.player.PlaybackService
 import com.youtubevoice.app.player.PlaybackStateStore
 import com.youtubevoice.app.player.SavedPlayback
@@ -39,6 +48,33 @@ import kotlinx.coroutines.withContext
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.util.UnstableApi
+
+data class CacheUiStats(
+    val totalBytes: Long = 0L,
+    val totalKeys: Int = 0,
+    val maxBytes: Long = 0L,
+    val trackBytes: Long = 0L,
+    val trackKeys: Int = 0,
+    /** ExoPlayer buffered position — furthest time ready without waiting on network. */
+    val bufferedPositionMs: Long = 0L,
+) {
+    val totalMbLabel: String get() = formatMb(totalBytes)
+    val maxMbLabel: String get() = formatMb(maxBytes)
+    val trackMbLabel: String get() = formatMb(trackBytes)
+    val diskFill: Float
+        get() = if (maxBytes > 0) (totalBytes.toFloat() / maxBytes).coerceIn(0f, 1f) else 0f
+
+    companion object {
+        fun formatMb(bytes: Long): String {
+            val mb = bytes / (1024.0 * 1024.0)
+            return when {
+                mb >= 100 -> "%.0f".format(mb)
+                mb >= 10 -> "%.1f".format(mb)
+                else -> "%.2f".format(mb)
+            }
+        }
+    }
+}
 
 data class PlayerUiState(
     val urlInput: String = "",
@@ -68,8 +104,15 @@ data class PlayerUiState(
     val showAddToPlaylist: Boolean = false,
     val showCreatePlaylist: Boolean = false,
     val showSettings: Boolean = false,
+    /** Must stay false until DataStore / [DpiSettingsStore.isEnabled] says otherwise. */
     val dpiEnabledPreference: Boolean = false,
     val dpiStatus: DpiStatus = DpiStatus.Disconnected,
+    val dpiPresetId: String = "oob_multisplit",
+    val dpiPresetTitle: String = "OOB multi",
+    val dpiTuneRunning: Boolean = false,
+    val dpiTuneMessage: String = "",
+    val cacheSettings: CacheSettings = CacheSettings(),
+    val cacheStats: CacheUiStats = CacheUiStats(),
 )
 
 @OptIn(UnstableApi::class)
@@ -81,6 +124,7 @@ class PlayerViewModel : ViewModel() {
 
     private var controller: MediaController? = null
     private var positionJob: Job? = null
+    private var cacheStatsJob: Job? = null
     private var trackMetaJob: Job? = null
     private var lastPersistAtMs = 0L
     private var lastPlayingForPersist: Boolean? = null
@@ -108,6 +152,20 @@ class PlayerViewModel : ViewModel() {
         viewModelScope.launch {
             DpiSettingsStore.enabledFlow(YoutubeVoiceApp.instance).collectLatest { enabled ->
                 _uiState.update { it.copy(dpiEnabledPreference = enabled) }
+                // Preference is source of truth: if OFF, tear down any leftover TUN/SOCKS.
+                if (!enabled) {
+                    DpiLauncher.stop(YoutubeVoiceApp.instance)
+                    AppHttp.setDpiModuleOff()
+                    PlaybackService.instance?.reloadHttpClient()
+                }
+            }
+        }
+        viewModelScope.launch {
+            DpiSettingsStore.presetIdFlow(YoutubeVoiceApp.instance).collectLatest { id ->
+                val preset = DpiPresets.byId(id)
+                _uiState.update {
+                    it.copy(dpiPresetId = preset.id, dpiPresetTitle = preset.title)
+                }
             }
         }
         viewModelScope.launch {
@@ -115,24 +173,127 @@ class PlayerViewModel : ViewModel() {
                 _uiState.update { it.copy(dpiStatus = status) }
             }
         }
+        viewModelScope.launch {
+            DpiAutoTune.progress.collectLatest { progress ->
+                _uiState.update {
+                    it.copy(
+                        dpiTuneRunning = progress.running,
+                        dpiTuneMessage = progress.message,
+                    )
+                }
+            }
+        }
+        viewModelScope.launch {
+            CacheSettingsStore.settingsFlow(YoutubeVoiceApp.instance).collectLatest { settings ->
+                _uiState.update { it.copy(cacheSettings = settings) }
+            }
+        }
+        startCacheStatsUpdates()
     }
 
     fun showSettings(show: Boolean) {
         _uiState.update { it.copy(showSettings = show) }
     }
 
-    /** Enable/disable local ByeDPI SOCKS proxy (no system VPN dialog). */
-    fun setDpiEnabled(enabled: Boolean) {
+    /**
+     * Persist toggle. When enabling, returns true so Activity can run VpnService.prepare().
+     * Enabling in-app DPI replaces any system VPN — notify the user.
+     */
+    fun setDpiEnabled(enabled: Boolean): Boolean {
         val app = YoutubeVoiceApp.instance
+        if (enabled && SystemVpn.isActive(app)) {
+            _uiState.update {
+                it.copy(
+                    infoMessage = "Встроенный DPI заменит VPN телефона. Выключите VPN телефона или оставьте DPI выключенным."
+                )
+            }
+        }
         viewModelScope.launch {
             DpiSettingsStore.setEnabled(app, enabled)
         }
         _uiState.update { it.copy(dpiEnabledPreference = enabled) }
-        if (enabled) {
-            DpiProxyService.start(app)
-        } else {
-            DpiProxyService.stop(app)
+        if (!enabled) {
+            DpiLauncher.stop(app)
+            AppHttp.setDpiModuleOff()
+            PlaybackService.instance?.reloadHttpClient()
+            return false
         }
+        return true
+    }
+
+    fun onVpnPermissionGranted() {
+        DpiLauncher.startVpn(YoutubeVoiceApp.instance)
+    }
+
+    fun onVpnPermissionDenied() {
+        DpiLauncher.startSocks(YoutubeVoiceApp.instance)
+        _uiState.update {
+            it.copy(infoMessage = "Разрешение локального туннеля отклонено — режим SOCKS (слабее)")
+        }
+    }
+
+    fun setDpiPreset(presetId: String) {
+        val app = YoutubeVoiceApp.instance
+        val preset = DpiPresets.byId(presetId)
+        viewModelScope.launch {
+            DpiSettingsStore.setPresetId(app, preset.id)
+            if (_uiState.value.dpiEnabledPreference) {
+                DpiLauncher.restart(app)
+            }
+        }
+        _uiState.update {
+            it.copy(dpiPresetId = preset.id, dpiPresetTitle = preset.title, dpiTuneMessage = "")
+        }
+    }
+
+    fun autoTuneDpi() {
+        if (_uiState.value.dpiTuneRunning) return
+        val app = YoutubeVoiceApp.instance
+        viewModelScope.launch {
+            DpiSettingsStore.setEnabled(app, true)
+            _uiState.update { it.copy(dpiEnabledPreference = true) }
+            val result = DpiAutoTune.run(app)
+            if (result.successPresetId != null) {
+                val preset = DpiPresets.byId(result.successPresetId)
+                _uiState.update { state ->
+                    state.copy(
+                        dpiPresetId = preset.id,
+                        dpiPresetTitle = preset.title,
+                        infoMessage = "Сохранён пресет «${preset.title}»",
+                    )
+                }
+            }
+        }
+    }
+
+    fun updateCacheSettings(transform: (CacheSettings) -> CacheSettings) {
+        viewModelScope.launch {
+            CacheSettingsStore.update(YoutubeVoiceApp.instance, transform)
+            PlaybackService.instance?.reloadCacheSettings()
+        }
+    }
+
+    fun clearAudioCache() {
+        viewModelScope.launch(Dispatchers.IO) {
+            AudioCacheStore.clearAll()
+            withContext(Dispatchers.Main) {
+                _uiState.update {
+                    it.copy(
+                        infoMessage = "Кэш аудио очищен",
+                        cacheStats = it.cacheStats.copy(
+                            totalBytes = 0L,
+                            totalKeys = 0,
+                            trackBytes = 0L,
+                            trackKeys = 0,
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    fun ensureDpiStopped() {
+        DpiLauncher.stop(YoutubeVoiceApp.instance)
     }
 
     fun restoreDpiIfEnabled() {
@@ -140,8 +301,38 @@ class PlayerViewModel : ViewModel() {
             DpiController.status.value != DpiStatus.Connected &&
             DpiController.status.value != DpiStatus.Connecting
         ) {
-            DpiProxyService.start(YoutubeVoiceApp.instance)
+            DpiLauncher.startPreferVpn(YoutubeVoiceApp.instance)
         }
+    }
+
+    private suspend fun awaitDpiIfNeeded() {
+        if (!_uiState.value.dpiEnabledPreference) return
+        val tunMode = DpiLauncher.currentMode() == DpiLauncher.Mode.Vpn
+        if (DpiController.status.value == DpiStatus.Connected &&
+            (tunMode || AppHttp.isDpiProxyEnabled())
+        ) {
+            return
+        }
+        if (DpiController.status.value != DpiStatus.Connecting &&
+            DpiController.status.value != DpiStatus.Connected
+        ) {
+            DpiLauncher.startPreferVpn(YoutubeVoiceApp.instance)
+        }
+        var waits = 0
+        while (waits < 40) {
+            val connected = DpiController.status.value == DpiStatus.Connected
+            val ready = connected && (
+                DpiLauncher.currentMode() == DpiLauncher.Mode.Vpn ||
+                    AppHttp.isDpiProxyEnabled()
+                )
+            if (ready) break
+            delay(150)
+            waits++
+        }
+        android.util.Log.i(
+            "YoutubeVoice",
+            "awaitDpi done status=${DpiController.status.value} mode=${DpiLauncher.currentMode()} proxy=${AppHttp.isDpiProxyEnabled()}"
+        )
     }
 
     fun attachController(mediaController: MediaController) {
@@ -260,6 +451,7 @@ class PlayerViewModel : ViewModel() {
 
     private fun openFromQuery(query: String) {
         val q = query.trim()
+        android.util.Log.i("YoutubeVoice", "openFromQuery: $q")
         when {
             repository.isChannelUrl(q) || q.startsWith("@") -> openChannel(q)
             q.contains("list=") -> {
@@ -270,12 +462,14 @@ class PlayerViewModel : ViewModel() {
                 viewModelScope.launch {
                     _uiState.update { it.copy(isLoading = true, error = null) }
                     try {
+                        awaitDpiIfNeeded()
                         applyPlaylist(repository.loadFromUrl(q))
                     } catch (e: Exception) {
                         val msg = e.message.orEmpty()
                         if (msg.startsWith("CHANNEL:")) {
                             openChannel(msg.removePrefix("CHANNEL:"))
                         } else {
+                            android.util.Log.w("YoutubeVoice", "openFromQuery failed: $q", e)
                             _uiState.update {
                                 it.copy(isLoading = false, error = e.message ?: "Не удалось открыть")
                             }
@@ -1013,6 +1207,7 @@ class PlayerViewModel : ViewModel() {
         val track = _uiState.value.playlist?.tracks?.firstOrNull { it.id == mediaId }
             ?: player.currentMediaItem?.let { trackFromMediaItem(it) }
         val previousId = _uiState.value.currentTrack?.id
+        val buffered = player.bufferedPosition.coerceAtLeast(0L)
         _uiState.update {
             it.copy(
                 isPlaying = player.isPlaying,
@@ -1020,12 +1215,14 @@ class PlayerViewModel : ViewModel() {
                 durationMs = player.duration.takeIf { d -> d > 0 } ?: 0L,
                 currentTrack = track ?: it.currentTrack,
                 shuffle = player.shuffleModeEnabled,
-                repeatMode = player.repeatMode
+                repeatMode = player.repeatMode,
+                cacheStats = it.cacheStats.copy(bufferedPositionMs = buffered),
             )
         }
         val newId = track?.id
         if (newId != null && newId != previousId) {
             refreshTrackMeta(track)
+            refreshCacheStats()
         }
         persistPlayback(force = false)
     }
@@ -1042,8 +1239,43 @@ class PlayerViewModel : ViewModel() {
         }
     }
 
+    private fun startCacheStatsUpdates() {
+        cacheStatsJob?.cancel()
+        cacheStatsJob = viewModelScope.launch {
+            while (isActive) {
+                refreshCacheStats()
+                delay(4_000)
+            }
+        }
+    }
+
+    private fun refreshCacheStats() {
+        viewModelScope.launch {
+            val trackId = _uiState.value.currentTrack?.id
+            val buffered = controller?.bufferedPosition?.coerceAtLeast(0L)
+                ?: _uiState.value.cacheStats.bufferedPositionMs
+            val snap = withContext(Dispatchers.IO) {
+                runCatching { AudioCacheStore.snapshot(trackId) }.getOrNull()
+            } ?: return@launch
+            _uiState.update {
+                it.copy(
+                    cacheStats = CacheUiStats(
+                        totalBytes = snap.totalBytes,
+                        totalKeys = snap.totalKeys,
+                        maxBytes = snap.maxBytes,
+                        trackBytes = snap.trackBytes,
+                        trackKeys = snap.trackKeys,
+                        bufferedPositionMs = buffered,
+                    )
+                )
+            }
+        }
+    }
+
     override fun onCleared() {
         persistPlayback(force = true)
+        positionJob?.cancel()
+        cacheStatsJob?.cancel()
         detachController()
         super.onCleared()
     }

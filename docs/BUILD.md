@@ -102,12 +102,12 @@ app/build/outputs/apk/debug/app-debug.apk
 Готовый APK в репозитории (для скачивания без сборки):
 
 ```
-releases/YouTubeVoice-1.2.0-debug.apk
+releases/YouTubeVoice-1.4.0-debug.apk
 ```
 
 Чтобы обновить файл в `releases/` после изменений кода:
 
 ```bat
 gradlew.bat :app:assembleDebug
-copy app\build\outputs\apk\debug\app-debug.apk releases\YouTubeVoice-1.2.0-debug.apk
+copy app\build\outputs\apk\debug\app-debug.apk releases\YouTubeVoice-1.4.0-debug.apk
 ```

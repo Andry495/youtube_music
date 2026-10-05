@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -33,9 +34,23 @@ class MainActivity : ComponentActivity() {
     private val viewModel: PlayerViewModel by viewModels()
     private var controllerFuture: ListenableFuture<MediaController>? = null
     private var pendingLoginEmail: String? = null
+    private var pendingAutoTune = false
 
     private val notificationPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* no-op */ }
+
+    private val vpnPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            if (result.resultCode == RESULT_OK) {
+                viewModel.onVpnPermissionGranted()
+            } else {
+                viewModel.onVpnPermissionDenied()
+            }
+            if (pendingAutoTune) {
+                pendingAutoTune = false
+                viewModel.autoTuneDpi()
+            }
+        }
 
     private val accountChooserLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -61,6 +76,21 @@ class MainActivity : ComponentActivity() {
             pendingLoginEmail = null
         }
 
+    private fun requestLocalDpiTunnel(thenAutoTune: Boolean = false) {
+        if (!viewModel.setDpiEnabled(true)) return
+        pendingAutoTune = thenAutoTune
+        val prepare = VpnService.prepare(this)
+        if (prepare != null) {
+            vpnPermissionLauncher.launch(prepare)
+        } else {
+            viewModel.onVpnPermissionGranted()
+            if (thenAutoTune) {
+                pendingAutoTune = false
+                viewModel.autoTuneDpi()
+            }
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -77,11 +107,16 @@ class MainActivity : ComponentActivity() {
                 }
 
                 LaunchedEffect(state.dpiEnabledPreference) {
-                    if (state.dpiEnabledPreference &&
-                        state.dpiStatus != DpiStatus.Connected &&
-                        state.dpiStatus != DpiStatus.Connecting
-                    ) {
-                        viewModel.restoreDpiIfEnabled()
+                    if (state.dpiEnabledPreference) {
+                        if (state.dpiStatus != DpiStatus.Connected &&
+                            state.dpiStatus != DpiStatus.Connecting
+                        ) {
+                            // Prefer already-granted TUN; otherwise SOCKS without dialog spam.
+                            viewModel.restoreDpiIfEnabled()
+                        }
+                    } else {
+                        // Preference OFF — kill any TUN left from a prior cold-start race.
+                        viewModel.ensureDpiStopped()
                     }
                 }
 
@@ -122,7 +157,16 @@ class MainActivity : ComponentActivity() {
                     onPlayChannelVideo = viewModel::playChannelVideo,
                     onConsumeMessage = viewModel::consumeMessage,
                     onShowSettings = viewModel::showSettings,
-                    onDpiEnabledChange = viewModel::setDpiEnabled
+                    onDpiEnabledChange = { enabled ->
+                        if (enabled) {
+                            requestLocalDpiTunnel(thenAutoTune = false)
+                        } else {
+                            viewModel.setDpiEnabled(false)
+                        }
+                    },
+                    onDpiAutoTune = { requestLocalDpiTunnel(thenAutoTune = true) },
+                    onCacheSettingsChange = viewModel::updateCacheSettings,
+                    onClearAudioCache = viewModel::clearAudioCache,
                 )
             }
         }
@@ -135,7 +179,31 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleIncomingIntent(intent: Intent?) {
-        val data = intent?.data?.toString() ?: return
+        if (intent == null) return
+        if (intent.hasExtra(EXTRA_ENABLE_DPI)) {
+            val enabled = intent.getBooleanExtra(EXTRA_ENABLE_DPI, true)
+            if (enabled) {
+                requestLocalDpiTunnel(
+                    thenAutoTune = intent.getBooleanExtra(EXTRA_AUTO_TUNE_DPI, false)
+                )
+            } else {
+                viewModel.setDpiEnabled(false)
+            }
+        } else if (intent.getBooleanExtra(EXTRA_AUTO_TUNE_DPI, false)) {
+            requestLocalDpiTunnel(thenAutoTune = true)
+        }
+        intent.getStringExtra(EXTRA_DPI_PRESET)?.takeIf { it.isNotBlank() }?.let { id ->
+            viewModel.setDpiPreset(id)
+        }
+        intent.getStringExtra(EXTRA_CACHE_EVICTION)?.takeIf { it.isNotBlank() }?.let { mode ->
+            viewModel.updateCacheSettings { current ->
+                val eviction = runCatching {
+                    com.youtubevoice.app.player.CacheEvictionMode.valueOf(mode)
+                }.getOrDefault(current.evictionMode)
+                current.copy(evictionMode = eviction)
+            }
+        }
+        val data = intent.data?.toString() ?: return
         if (data.contains("youtube.com") || data.contains("youtu.be")) {
             viewModel.onUrlChange(data)
             viewModel.loadUrl()
@@ -170,5 +238,13 @@ class MainActivity : ComponentActivity() {
         if (!granted) {
             notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
+    }
+
+    companion object {
+        const val EXTRA_ENABLE_DPI = "enable_dpi"
+        const val EXTRA_AUTO_TUNE_DPI = "auto_tune_dpi"
+        const val EXTRA_DPI_PRESET = "dpi_preset"
+        /** Optional: WINDOW / LRU / WINDOW_AND_LRU */
+        const val EXTRA_CACHE_EVICTION = "cache_eviction"
     }
 }
