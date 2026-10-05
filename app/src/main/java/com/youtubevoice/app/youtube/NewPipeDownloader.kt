@@ -2,6 +2,7 @@ package com.youtubevoice.app.youtube
 
 import com.youtubevoice.app.dpi.AppHttp
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import org.schabi.newpipe.extractor.downloader.Downloader
 import org.schabi.newpipe.extractor.downloader.Request
 import org.schabi.newpipe.extractor.downloader.Response
@@ -22,11 +23,21 @@ object NewPipeDownloader : Downloader() {
     fun cookieOrNull(): String? = cookieRef.get()
 
     override fun execute(request: Request): Response {
+        val rawUrl = request.url()
+        val httpUrl = rawUrl.toHttpUrlOrNull()
+            ?: error("Bad URL: $rawUrl")
+        val url = AppHttp.rewriteUrl(httpUrl)
         val builder = okhttp3.Request.Builder()
-            .url(request.url())
+            .url(url)
             .header("User-Agent", USER_AGENT)
+            .header("Host", url.host)
 
         request.headers().forEach { (key, values) ->
+            if (key.equals("Host", ignoreCase = true) ||
+                key.equals("User-Agent", ignoreCase = true)
+            ) {
+                return@forEach
+            }
             values.forEach { value -> builder.addHeader(key, value) }
         }
 

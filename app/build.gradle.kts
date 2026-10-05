@@ -13,8 +13,8 @@ android {
         applicationId = "com.youtubevoice.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 6
-        versionName = "1.3.1"
+        versionCode = 8
+        versionName = "1.4.0"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")

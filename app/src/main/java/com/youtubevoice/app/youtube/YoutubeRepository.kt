@@ -1,4 +1,4 @@
-﻿package com.youtubevoice.app.youtube
+package com.youtubevoice.app.youtube
 
 import com.youtubevoice.app.data.ChannelBrowseTab
 import com.youtubevoice.app.data.ChannelPage
@@ -35,7 +35,7 @@ class YoutubeRepository(
 
     suspend fun search(query: String): List<SearchHit> = withContext(Dispatchers.IO) {
         val q = query.trim()
-        require(q.isNotEmpty()) { "Введите запрос" }
+        require(q.isNotEmpty()) { "Ââåäèòå çàïðîñ" }
         val extractor = ServiceList.YouTube.getSearchExtractor(q)
         extractor.fetchPage()
         val hits = mutableListOf<SearchHit>()
@@ -63,7 +63,7 @@ class YoutubeRepository(
         val channelId = channelExtractor.id?.takeIf { it.startsWith("UC") }
             ?: channelIdFromUploaderUrl(channelExtractor.url)
             ?: channelIdFromUploaderUrl(channelUrl)
-            ?: throw IllegalStateException("Не удалось определить канал")
+            ?: throw IllegalStateException("Íå óäàëîñü îïðåäåëèòü êàíàë")
 
         val handle = channelExtractor.url
             ?.substringAfter("/@", "")
@@ -73,7 +73,7 @@ class YoutubeRepository(
 
         val base = ChannelPage(
             channelId = channelId,
-            title = channelExtractor.name.orEmpty().ifBlank { "Канал" },
+            title = channelExtractor.name.orEmpty().ifBlank { "Êàíàë" },
             handle = handle,
             thumbnailUrl = channelExtractor.avatars.maxByOrNull { it.height }?.url,
             description = channelExtractor.description.orEmpty(),
@@ -87,7 +87,7 @@ class YoutubeRepository(
             ChannelBrowseTab.VIDEOS -> {
                 val uploadsId = "UU" + channelId.removePrefix("UC")
                 val videos = runCatching {
-                    loadPlaylist("https://www.youtube.com/playlist?list=$uploadsId").tracks
+                    loadPlaylist("https://youtube.com/playlist?list=$uploadsId").tracks
                 }.getOrElse { loadChannelViaTabs(channelId).tracks }
                 base.copy(videos = videos.map { t ->
                     if (t.channelId == null) t.copy(channelId = channelId) else t
@@ -98,9 +98,9 @@ class YoutubeRepository(
 
     suspend fun loadChannel(channelId: String): PlaylistInfo = withContext(Dispatchers.IO) {
         val id = channelId.trim()
-        require(id.startsWith("UC")) { "Некорректный id канала" }
+        require(id.startsWith("UC")) { "Íåêîððåêòíûé id êàíàëà" }
         val uploadsId = "UU" + id.removePrefix("UC")
-        val uploadsUrl = "https://www.youtube.com/playlist?list=$uploadsId"
+        val uploadsUrl = "https://youtube.com/playlist?list=$uploadsId"
         runCatching { loadPlaylist(uploadsUrl) }
             .map { it.copy(id = id, uploader = it.uploader.ifBlank { it.title }) }
             .getOrElse { loadChannelViaTabs(id) }
@@ -129,7 +129,7 @@ class YoutubeRepository(
                         title = item.name.orEmpty().ifBlank { id },
                         itemCount = item.streamCount.coerceAtLeast(0L).toInt().coerceAtLeast(0),
                         thumbnailUrl = item.thumbnails.maxByOrNull { it.height }?.url,
-                        url = "https://www.youtube.com/playlist?list=$id"
+                        url = "https://youtube.com/playlist?list=$id"
                     )
                 }
             }
@@ -142,7 +142,7 @@ class YoutubeRepository(
     }
 
     private fun loadChannelViaTabs(id: String): PlaylistInfo {
-        val channelUrl = "https://www.youtube.com/channel/$id"
+        val channelUrl = "https://youtube.com/channel/$id"
         val channelExtractor = ServiceList.YouTube.getChannelExtractor(channelUrl)
         channelExtractor.fetchPage()
         val videosTab = channelExtractor.tabs.firstOrNull { tab ->
@@ -154,7 +154,7 @@ class YoutubeRepository(
                 !tab.url.contains("/streams", ignoreCase = true) &&
                 !tab.url.contains("/playlists", ignoreCase = true)
         } ?: channelExtractor.tabs.firstOrNull()
-            ?: throw IllegalStateException("Не удалось открыть вкладку видео канала")
+            ?: throw IllegalStateException("Íå óäàëîñü îòêðûòü âêëàäêó âèäåî êàíàëà")
 
         val tabExtractor = ServiceList.YouTube.getChannelTabExtractor(videosTab)
         tabExtractor.fetchPage()
@@ -174,10 +174,10 @@ class YoutubeRepository(
             page = tabExtractor.getPage(next)
             pages++
         }
-        if (tracks.isEmpty()) throw IllegalStateException("На канале не найдено видео")
+        if (tracks.isEmpty()) throw IllegalStateException("Íà êàíàëå íå íàéäåíî âèäåî")
         return PlaylistInfo(
             id = id,
-            title = channelExtractor.name.orEmpty().ifBlank { "Канал" },
+            title = channelExtractor.name.orEmpty().ifBlank { "Êàíàë" },
             uploader = channelExtractor.name.orEmpty(),
             thumbnailUrl = channelExtractor.avatars.maxByOrNull { it.height }?.url
                 ?: tracks.firstOrNull()?.thumbnailUrl,
@@ -190,7 +190,7 @@ class YoutubeRepository(
             val cached = audioCache[trackId]
             if (cached != null && cached.expiresAtMs > System.currentTimeMillis() + 60_000) {
                 val ua = cached.userAgent.orEmpty()
-                // Plain ANDROID progressive URLs are PO-token gated (HTTP 403) — don't reuse
+                // Plain ANDROID progressive URLs are PO-token gated (HTTP 403)  don't reuse
                 val brokenAndroid = ua.contains("com.google.android.youtube/") &&
                     !ua.contains("youtube.vr")
                 if (!brokenAndroid) return@withContext cached
@@ -234,7 +234,7 @@ class YoutubeRepository(
                     )
                 }
                 val stream = pickBestAudio(extractor.audioStreams)
-                    ?: error("Аудиопоток не найден для: ${extractor.name}")
+                    ?: error("Àóäèîïîòîê íå íàéäåí äëÿ: ${extractor.name}")
                 ResolvedAudio(
                     trackId = videoId,
                     streamUrl = stream.content,
@@ -243,7 +243,7 @@ class YoutubeRepository(
                 )
             }.getOrElse { error ->
                 throw IllegalStateException(
-                    "Не удалось получить аудио: ${error.message}",
+                    "Íå óäàëîñü ïîëó÷èòü àóäèî: ${error.message}",
                     error
                 )
             }
@@ -272,8 +272,8 @@ class YoutubeRepository(
     private fun resolveChannelUrl(channelRef: String): String {
         val raw = channelRef.trim()
         return when {
-            raw.startsWith("UC") && !raw.contains("/") -> "https://www.youtube.com/channel/$raw"
-            raw.startsWith("@") -> "https://www.youtube.com/$raw"
+            raw.startsWith("UC") && !raw.contains("/") -> "https://youtube.com/channel/$raw"
+            raw.startsWith("@") -> "https://youtube.com/$raw"
             raw.startsWith("http") -> raw
                 .substringBefore("/playlists")
                 .substringBefore("/videos")
@@ -281,15 +281,15 @@ class YoutubeRepository(
                 .substringBefore("/featured")
                 .trimEnd('/')
             raw.startsWith("www.") -> resolveChannelUrl("https://$raw")
-            else -> "https://www.youtube.com/$raw"
+            else -> "https://youtube.com/$raw"
         }
     }
 
     suspend fun loadPlaylistById(playlistId: String, maxTracks: Int = 40): PlaylistInfo =
         withContext(Dispatchers.IO) {
             val id = playlistId.trim().removePrefix("VL")
-            require(id.isNotBlank()) { "Пустой id плейлиста" }
-            val url = "https://www.youtube.com/playlist?list=$id"
+            require(id.isNotBlank()) { "Ïóñòîé id ïëåéëèñòà" }
+            val url = "https://youtube.com/playlist?list=$id"
             val extractor = ServiceList.YouTube.getPlaylistExtractor(url)
             extractor.fetchPage()
             val tracks = mutableListOf<Track>()
@@ -307,7 +307,7 @@ class YoutubeRepository(
             }
             PlaylistInfo(
                 id = extractor.id.orEmpty().ifBlank { id },
-                title = extractor.name.orEmpty().ifBlank { "Плейлист" },
+                title = extractor.name.orEmpty().ifBlank { "Ïëåéëèñò" },
                 uploader = extractor.uploaderName.orEmpty(),
                 thumbnailUrl = extractor.thumbnails.maxByOrNull { it.height }?.url,
                 tracks = tracks
@@ -333,7 +333,7 @@ class YoutubeRepository(
             id = extractor.id.orEmpty().ifBlank {
                 extractPlaylistIdFromUrl(url).orEmpty()
             },
-            title = extractor.name.orEmpty().ifBlank { "Плейлист" },
+            title = extractor.name.orEmpty().ifBlank { "Ïëåéëèñò" },
             uploader = extractor.uploaderName.orEmpty(),
             thumbnailUrl = extractor.thumbnails.maxByOrNull { it.height }?.url,
             tracks = tracks
@@ -354,25 +354,34 @@ class YoutubeRepository(
     }
 
     private fun loadSingleVideo(url: String): PlaylistInfo {
-        val extractor = ServiceList.YouTube.getStreamExtractor(url)
-        extractor.fetchPage()
-        val track = Track(
-            id = extractor.id,
-            title = extractor.name.orEmpty(),
-            artist = extractor.uploaderName.orEmpty(),
-            thumbnailUrl = extractor.thumbnails.maxByOrNull { it.height }?.url,
-            watchUrl = extractor.url,
-            durationSeconds = extractor.length,
-            channelId = channelIdFromUploaderUrl(extractor.uploaderUrl)
-        )
-        pickBestAudio(extractor.audioStreams)?.let { stream ->
-            audioCache[track.id] = ResolvedAudio(
-                trackId = track.id,
+        val videoId = extractVideoId(url)
+            ?: error("Некорректная ссылка на видео")
+        val (track, resolved) = runCatching {
+            libraryApi.loadPlayableVideo(videoId, NewPipeDownloader.cookieOrNull())
+        }.recoverCatching { inner ->
+            android.util.Log.w("YoutubeVoice", "InnerTube load failed, NewPipe fallback", inner)
+            val extractor = ServiceList.YouTube.getStreamExtractor(url)
+            extractor.fetchPage()
+            val t = Track(
+                id = extractor.id,
+                title = extractor.name.orEmpty(),
+                artist = extractor.uploaderName.orEmpty(),
+                thumbnailUrl = extractor.thumbnails.maxByOrNull { it.height }?.url,
+                watchUrl = extractor.url,
+                durationSeconds = extractor.length,
+                channelId = channelIdFromUploaderUrl(extractor.uploaderUrl)
+            )
+            val stream = pickBestAudio(extractor.audioStreams)
+                ?: error("Аудиопоток не найден")
+            t to ResolvedAudio(
+                trackId = t.id,
                 streamUrl = stream.content,
                 mimeType = stream.format?.mimeType,
                 expiresAtMs = System.currentTimeMillis() + 4 * 60 * 60 * 1000L
             )
-        }
+        }.getOrThrow()
+
+        audioCache[track.id] = resolved
         return PlaylistInfo(
             id = track.id,
             title = track.title,
@@ -399,7 +408,7 @@ class YoutubeRepository(
             SearchHit.Channel(
                 id = "ch_$channelId",
                 title = name.orEmpty(),
-                subtitle = url.substringAfter("youtube.com/").take(48).ifBlank { "Канал" },
+                subtitle = url.substringAfter("youtube.com/").take(48).ifBlank { "Êàíàë" },
                 thumbnailUrl = thumbnails.maxByOrNull { it.height }?.url,
                 channelId = channelId,
                 handle = url.substringAfter("/@", "").substringBefore('/').takeIf { it.isNotBlank() }
@@ -411,7 +420,7 @@ class YoutubeRepository(
             if (playlistId.isBlank()) null else SearchHit.Playlist(
                 id = "pl_$playlistId",
                 title = name.orEmpty(),
-                subtitle = uploaderName.orEmpty().ifBlank { "Плейлист" },
+                subtitle = uploaderName.orEmpty().ifBlank { "Ïëåéëèñò" },
                 thumbnailUrl = thumbnails.maxByOrNull { it.height }?.url,
                 playlistId = playlistId
             )
@@ -423,7 +432,7 @@ class YoutubeRepository(
                 title = name.orEmpty(),
                 subtitle = uploaderName.orEmpty(),
                 thumbnailUrl = thumbnails.maxByOrNull { it.height }?.url,
-                watchUrl = "https://www.youtube.com/watch?v=$videoId",
+                watchUrl = "https://youtube.com/watch?v=$videoId",
                 channelId = channelIdFromUploaderUrl(uploaderUrl)
             )
         }
@@ -437,7 +446,7 @@ class YoutubeRepository(
             title = name.orEmpty(),
             artist = uploaderName.orEmpty(),
             thumbnailUrl = thumbnails.maxByOrNull { it.height }?.url,
-            watchUrl = if (videoId.startsWith("http")) url else "https://www.youtube.com/watch?v=$videoId",
+            watchUrl = if (videoId.startsWith("http")) url else "https://youtube.com/watch?v=$videoId",
             durationSeconds = duration,
             channelId = channelIdFromUploaderUrl(uploaderUrl)
         )
@@ -467,7 +476,7 @@ class YoutubeRepository(
         return when {
             trimmed.startsWith("http://") || trimmed.startsWith("https://") -> trimmed
             trimmed.startsWith("www.") -> "https://$trimmed"
-            trimmed.startsWith("@") -> "https://www.youtube.com/$trimmed"
+            trimmed.startsWith("@") -> "https://youtube.com/$trimmed"
             trimmed.startsWith("youtu.be/") || trimmed.startsWith("youtube.com/") -> "https://$trimmed"
             else -> trimmed
         }

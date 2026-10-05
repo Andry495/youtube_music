@@ -17,6 +17,7 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.YoutubeVoice"
+        android:largeHeap="true"
         android:usesCleartextTraffic="false">
 
         <activity
@@ -61,6 +62,19 @@
             android:name=".dpi.DpiProxyService"
             android:exported="false"
             android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="@string/dpi_property_desc" />
+        </service>
+
+        <service
+            android:name=".dpi.DpiVpnService"
+            android:exported="false"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:foregroundServiceType="specialUse">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="@string/dpi_property_desc" />

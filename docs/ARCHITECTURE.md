@@ -33,10 +33,12 @@
 
 ### Плеер (`player/`)
 
-- `PlaybackService` — MediaSessionService, ExoPlayer, сеть, prefetch **3** трека вперёд
-- `AudioCacheStore` — SimpleCache: лимит `min(256MB, max(64MB, 5% free))`, `retainOnly(current+3)`, ~10 МБ на prefetch-трек
+- `PlaybackService` — MediaSessionService, ExoPlayer, сеть; при скипе `rotateCacheForCenter` (окно, не полный wipe)
+- `CacheSettingsStore` — лимит МБ, ahead/behind, порядок prefetch, режим вытеснения
+- `AudioCacheStore` / `AudioCacheKeys` — SimpleCache; ключи `{trackId}|…`; `retainOnly` по окну (кроме режима LRU)
 - `PlaybackStateStore` — DataStore: очередь, индекс трека, позиция, флаг «играло»
-- `DpiVpnService` — локальный DPI (ByeDPI + hev), только `addAllowedApplication(свой пакет)`
+- `DpiVpnService` — опциональный TUN → hev → ByeDPI (`addAllowedApplication` только свой пакет); по умолчанию выкл.
+- `DpiProxyService` — запасной SOCKS ByeDPI без TUN
 
 ### Данные (`youtube/`)
 
@@ -60,7 +62,9 @@
 
 **Перезапуск приложения:** `PlaybackStateStore` → `setPlaylist(..., startPositionMs)` без потери трека.
 
-**Кэш:** при смене трека/плейлиста `retainOnly` оставляет только current + до 3 следующих; LRU внутри динамического потолка.
+**Кэш:** при смене трека не очищается целиком. Считается окно (текущий ± ahead/behind по политике), `retainOnly` удаляет чужие track id, затем prefetch добирает дырки. Режимы: WINDOW / LRU / WINDOW_AND_LRU. Текущий HLS пишет ExoPlayer; отдельный CacheWriter на играющий элемент не запускается (OOM на длинных плейлистах). Парсер m3u8 не считает media-сегменты (`videoplayback`, query `hls_playlist`) вложенными плейлистами.
+
+**DPI:** выкл. по умолчанию — совместим с VPN телефона. Вкл. — локальный TUN только для этого пакета (вытесняет системный VPN).
 
 ## Сеть / DPI
 
