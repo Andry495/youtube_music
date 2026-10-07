@@ -688,12 +688,37 @@ private fun NowPlayingPanel(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            val duration = state.durationMs.coerceAtLeast(0L)
+            val trackDurationMs = (state.currentTrack?.durationSeconds ?: 0L)
+                .coerceAtLeast(0L) * 1000L
+            val duration = maxOf(
+                state.durationMs.takeIf { it > 0 } ?: 0L,
+                trackDurationMs
+            )
             val position = state.positionMs.coerceIn(0L, duration.takeIf { it > 0 } ?: state.positionMs)
             val buffered = state.cacheStats.bufferedPositionMs
                 .coerceIn(0L, duration.takeIf { it > 0 } ?: state.cacheStats.bufferedPositionMs)
+            val diskUntil = state.cacheStats.diskUntilMs
+                .coerceIn(0L, duration.takeIf { it > 0 } ?: state.cacheStats.diskUntilMs)
             val playRatio = if (duration > 0) position.toFloat() / duration else 0f
-            val bufferRatio = if (duration > 0) buffered.toFloat() / duration else 0f
+            val diskRatio = if (duration > 0 && diskUntil > 0L) {
+                (diskUntil.toFloat() / duration).coerceIn(0f, 1f)
+            } else {
+                state.cacheStats.trackFill
+            }
+            val bufferRatio = if (duration > 0 && buffered > 0L) {
+                (buffered.toFloat() / duration).coerceIn(0f, 1f)
+            } else {
+                0f
+            }
+            val progressLabel = buildString {
+                val parts = mutableListOf<String>()
+                if (diskUntil > 0L) parts += "кэш до ${formatTime(diskUntil)}"
+                if (buffered > 0L) parts += "буфер ${formatTime(buffered)}"
+                if (parts.isEmpty() && state.cacheStats.trackBytes > 0L) {
+                    parts += "диск ${state.cacheStats.trackMbLabel} МБ"
+                }
+                append(parts.joinToString(" · ").ifEmpty { "—" })
+            }
 
             Box(
                 modifier = Modifier
@@ -701,15 +726,28 @@ private fun NowPlayingPanel(
                     .padding(horizontal = 4.dp),
                 contentAlignment = Alignment.CenterStart
             ) {
+                // Disk cache (how far the track is downloaded)
                 LinearProgressIndicator(
-                    progress = { bufferRatio.coerceIn(0f, 1f) },
+                    progress = { diskRatio.coerceIn(0f, 1f) },
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(4.dp)
+                        .height(6.dp)
                         .padding(horizontal = 8.dp),
-                    color = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.55f),
+                    color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.45f),
                     trackColor = MaterialTheme.colorScheme.surfaceVariant,
                 )
+                // RAM / ExoPlayer buffer
+                if (bufferRatio > 0f) {
+                    LinearProgressIndicator(
+                        progress = { bufferRatio.coerceIn(0f, 1f) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(6.dp)
+                            .padding(horizontal = 8.dp),
+                        color = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.65f),
+                        trackColor = Color.Transparent,
+                    )
+                }
                 Slider(
                     value = playRatio.coerceIn(0f, 1f),
                     onValueChange = { ratio ->
@@ -728,9 +766,9 @@ private fun NowPlayingPanel(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Text(
-                    text = "буфер ${formatTime(buffered)}",
+                    text = progressLabel,
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.tertiary
+                    color = MaterialTheme.colorScheme.secondary
                 )
                 Text(
                     text = formatTime(duration),
@@ -738,16 +776,34 @@ private fun NowPlayingPanel(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
+            state.playerStatus?.let { status ->
+                Text(
+                    text = status,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+            }
             if (state.currentTrack != null || state.cacheStats.totalBytes > 0L) {
                 val stats = state.cacheStats
                 Text(
                     text = buildString {
                         append("Кэш трека ${stats.trackMbLabel} МБ")
-                        if (stats.trackKeys > 0) append(" · ${stats.trackKeys} сегм.")
+                        if (stats.expectedSegments > 0) {
+                            append(" · ${stats.uniqueSegments}/${stats.expectedSegments} сегм.")
+                            if (stats.trackComplete) append(" · полный")
+                        } else if (stats.trackKeys > 0) {
+                            append(" · ${stats.trackKeys} сегм.")
+                        }
                         append(" · всего ${stats.totalMbLabel}/${stats.maxMbLabel} МБ")
+                        if (stats.isDownloading) append(" · качает")
                     },
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = if (stats.isDownloading) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
                     modifier = Modifier.padding(top = 2.dp)
                 )
                 LinearProgressIndicator(
@@ -781,11 +837,19 @@ private fun NowPlayingPanel(
                     onClick = onPlayPause,
                     modifier = Modifier.size(64.dp)
                 ) {
-                    Icon(
-                        if (state.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                        contentDescription = "Play/Pause",
-                        modifier = Modifier.size(32.dp)
-                    )
+                    if (state.isPlayerBusy && !state.isPlaying) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(28.dp),
+                            strokeWidth = 3.dp,
+                            color = MaterialTheme.colorScheme.onPrimary
+                        )
+                    } else {
+                        Icon(
+                            if (state.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                            contentDescription = "Play/Pause",
+                            modifier = Modifier.size(32.dp)
+                        )
+                    }
                 }
                 IconButton(onClick = onNext) {
                     Icon(Icons.Default.SkipNext, contentDescription = "Next")
@@ -838,13 +902,22 @@ private fun MiniPlayerBar(
     compact: Boolean
 ) {
     val track = state.currentTrack ?: return
-    val durationSafe = state.durationMs.coerceAtLeast(0L)
+    val trackDurationMs = track.durationSeconds.coerceAtLeast(0L) * 1000L
+    val durationSafe = maxOf(
+        state.durationMs.takeIf { it > 0 } ?: 0L,
+        trackDurationMs
+    )
     val progress = if (durationSafe > 0) {
         state.positionMs.toFloat() / durationSafe
     } else {
         0f
     }
-    val buffered = if (durationSafe > 0) {
+    val disk = if (durationSafe > 0 && state.cacheStats.diskUntilMs > 0) {
+        (state.cacheStats.diskUntilMs.toFloat() / durationSafe).coerceIn(0f, 1f)
+    } else {
+        state.cacheStats.trackFill
+    }
+    val buffered = if (durationSafe > 0 && state.cacheStats.bufferedPositionMs > 0) {
         (state.cacheStats.bufferedPositionMs.toFloat() / durationSafe).coerceIn(0f, 1f)
     } else {
         0f
@@ -857,11 +930,19 @@ private fun MiniPlayerBar(
         Column {
             Box(modifier = Modifier.fillMaxWidth().height(3.dp)) {
                 LinearProgressIndicator(
-                    progress = { buffered },
+                    progress = { disk.coerceIn(0f, 1f) },
                     modifier = Modifier.fillMaxWidth().height(3.dp),
-                    color = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.5f),
+                    color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.45f),
                     trackColor = MaterialTheme.colorScheme.surfaceVariant
                 )
+                if (buffered > 0f) {
+                    LinearProgressIndicator(
+                        progress = { buffered },
+                        modifier = Modifier.fillMaxWidth().height(3.dp),
+                        color = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.6f),
+                        trackColor = Color.Transparent
+                    )
+                }
                 LinearProgressIndicator(
                     progress = { progress.coerceIn(0f, 1f) },
                     modifier = Modifier.fillMaxWidth().height(3.dp),
@@ -893,18 +974,29 @@ private fun MiniPlayerBar(
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
-                        text = track.artist,
+                        text = state.playerStatus ?: track.artist,
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = if (state.playerStatus != null) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                 }
                 IconButton(onClick = onPlayPause) {
-                    Icon(
-                        if (state.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                        contentDescription = "Play/Pause"
-                    )
+                    if (state.isPlayerBusy && !state.isPlaying) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(22.dp),
+                            strokeWidth = 2.dp
+                        )
+                    } else {
+                        Icon(
+                            if (state.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                            contentDescription = "Play/Pause"
+                        )
+                    }
                 }
                 IconButton(onClick = onNext) {
                     Icon(Icons.Default.SkipNext, contentDescription = "Next")
@@ -1750,7 +1842,7 @@ private fun SettingsSheet(
                 )
             }
             Text(
-                text = "Пока играет (в т.ч. в фоне) текущий трек докачивается целиком в кэш; соседние — по лимиту МБ ниже. Порядок задаёт, кого греть первым.",
+                text = "Пока играет (в т.ч. в фоне) текущий трек докачивается сегментами в кэш (до ~32 МБ за проход, цикл пока FGS активен); соседние — по лимиту МБ ниже. Порядок задаёт, кого греть первым.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

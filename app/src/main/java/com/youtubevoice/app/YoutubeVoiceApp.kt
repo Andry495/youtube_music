@@ -13,6 +13,7 @@ import com.youtubevoice.app.dpi.DpiFakeAssets
 import com.youtubevoice.app.dpi.DpiLauncher
 import com.youtubevoice.app.dpi.DpiSettingsStore
 import com.youtubevoice.app.player.CacheSettingsStore
+import com.youtubevoice.app.player.StreamUrlStore
 import com.youtubevoice.app.youtube.NewPipeDownloader
 import com.youtubevoice.app.youtube.YoutubeLibraryApi
 import com.youtubevoice.app.youtube.YoutubeRepository
@@ -46,6 +47,7 @@ class YoutubeVoiceApp : Application(), ImageLoaderFactory {
                 }
             }
             runCatching { CacheSettingsStore.hydrate(this@YoutubeVoiceApp) }
+            runCatching { StreamUrlStore.hydrate(this@YoutubeVoiceApp) }
         }
         NewPipe.init(NewPipeDownloader, Localization.DEFAULT)
         org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor

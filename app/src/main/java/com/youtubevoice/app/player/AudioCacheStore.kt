@@ -174,6 +174,45 @@ object AudioCacheStore {
         }.getOrDefault(0)
     }
 
+    /** All SimpleCache keys belonging to [trackId] (exact id or `{id}|…`). */
+    fun keysForTrack(trackId: String): List<String> {
+        if (trackId.isBlank()) return emptyList()
+        val c = cache ?: return emptyList()
+        return runCatching {
+            c.keys.filter { AudioCacheKeys.belongsToTrack(it, trackId) }
+        }.getOrDefault(emptyList())
+    }
+
+    /**
+     * Keep one disk entry per logical HLS clip (itag+gosq). Drops CDN/signature duplicates
+     * so offline playback always has a clean ordered set. Returns removed key count.
+     */
+    fun dedupeTrackSegments(trackId: String): Int {
+        if (trackId.isBlank()) return 0
+        val c = cache ?: return 0
+        return runCatching {
+            val segmentKeys = keysForTrack(trackId)
+                .filter { AudioCacheKeys.looksLikeMediaSegment(it) }
+            if (segmentKeys.size < 2) return@runCatching 0
+            val keep = AudioCacheKeys.canonicalSegments(segmentKeys).toHashSet()
+            var removed = 0
+            for (key in segmentKeys) {
+                if (key !in keep) {
+                    c.removeResource(key)
+                    removed++
+                }
+            }
+            if (removed > 0) {
+                Log.i(
+                    TAG,
+                    "dedupe $trackId removed=$removed keep=${keep.size} " +
+                        "bytes=${cachedBytesForTrack(trackId)}"
+                )
+            }
+            removed
+        }.getOrDefault(0)
+    }
+
     fun snapshot(trackId: String? = null): CacheDiskSnapshot {
         val total = cachedBytes()
         val keys = keyCount()

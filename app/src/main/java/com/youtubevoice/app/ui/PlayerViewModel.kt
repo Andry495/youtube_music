@@ -33,6 +33,7 @@ import com.youtubevoice.app.player.CacheSettingsStore
 import com.youtubevoice.app.player.PlaybackService
 import com.youtubevoice.app.player.PlaybackStateStore
 import com.youtubevoice.app.player.SavedPlayback
+import com.youtubevoice.app.player.TrackCacheProgress
 import com.youtubevoice.app.youtube.NewPipeDownloader
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -55,14 +56,33 @@ data class CacheUiStats(
     val maxBytes: Long = 0L,
     val trackBytes: Long = 0L,
     val trackKeys: Int = 0,
+    /** Unique HLS clips for the current track. */
+    val uniqueSegments: Int = 0,
+    /** Expected clips from catalog duration (~5s each). */
+    val expectedSegments: Int = 0,
+    /** Approx cached duration of unique segments. */
+    val cachedApproxMs: Long = 0L,
+    /** Contiguous cache ahead of playback position. */
+    val cachedAheadMs: Long = 0L,
+    /** Furthest time on the progress bar covered by disk cache. */
+    val diskUntilMs: Long = 0L,
+    val trackComplete: Boolean = false,
     /** ExoPlayer buffered position — furthest time ready without waiting on network. */
     val bufferedPositionMs: Long = 0L,
+    /** True while disk cache for the current track is growing between polls. */
+    val isDownloading: Boolean = false,
 ) {
     val totalMbLabel: String get() = formatMb(totalBytes)
     val maxMbLabel: String get() = formatMb(maxBytes)
     val trackMbLabel: String get() = formatMb(trackBytes)
     val diskFill: Float
         get() = if (maxBytes > 0) (totalBytes.toFloat() / maxBytes).coerceIn(0f, 1f) else 0f
+    val trackFill: Float
+        get() = when {
+            expectedSegments > 0 ->
+                (uniqueSegments.toFloat() / expectedSegments).coerceIn(0f, 1f)
+            else -> 0f
+        }
 
     companion object {
         fun formatMb(bytes: Long): String {
@@ -87,6 +107,10 @@ data class PlayerUiState(
     val playlist: PlaylistInfo? = null,
     val currentTrack: Track? = null,
     val isPlaying: Boolean = false,
+    /** Player is working: resolving URL, buffering, or loading. */
+    val isPlayerBusy: Boolean = false,
+    /** Short status under the seek bar (null = idle). */
+    val playerStatus: String? = null,
     val positionMs: Long = 0L,
     val durationMs: Long = 0L,
     val shuffle: Boolean = false,
@@ -127,6 +151,8 @@ class PlayerViewModel : ViewModel() {
     private var cacheStatsJob: Job? = null
     private var trackMetaJob: Job? = null
     private var lastPersistAtMs = 0L
+    private var lastTrackBytesForDownload: Long = -1L
+    private var lastTrackIdForDownload: String? = null
     private var lastPlayingForPersist: Boolean? = null
     private var restoreAttempted = false
 
@@ -1168,12 +1194,14 @@ class PlayerViewModel : ViewModel() {
     private fun trackFromMediaItem(item: MediaItem): Track {
         val meta: MediaMetadata = item.mediaMetadata
         val id = item.mediaId
+        val durationMs = meta.durationMs ?: 0L
         return Track(
             id = id,
             title = meta.title?.toString().orEmpty().ifBlank { "Трек" },
             artist = meta.artist?.toString().orEmpty(),
             thumbnailUrl = meta.artworkUri?.toString(),
-            watchUrl = "https://www.youtube.com/watch?v=$id"
+            watchUrl = "https://www.youtube.com/watch?v=$id",
+            durationSeconds = if (durationMs > 0L) durationMs / 1000L else 0L
         )
     }
 
@@ -1208,11 +1236,45 @@ class PlayerViewModel : ViewModel() {
             ?: player.currentMediaItem?.let { trackFromMediaItem(it) }
         val previousId = _uiState.value.currentTrack?.id
         val buffered = player.bufferedPosition.coerceAtLeast(0L)
+        val uriScheme = player.currentMediaItem?.localConfiguration?.uri?.scheme
+        val resolving = uriScheme == "youtubevoice"
+        val buffering = player.playbackState == Player.STATE_BUFFERING || player.isLoading
+        val waitingToPlay = player.playWhenReady && !player.isPlaying
+        val busy = resolving || buffering || waitingToPlay
+        val trackDurationMs = (track?.durationSeconds ?: 0L).coerceAtLeast(0L) * 1000L
+        val playerDuration = player.duration.takeIf { d -> d > 0 } ?: 0L
+        val downloading = _uiState.value.cacheStats.isDownloading
+        val hasDisk = _uiState.value.cacheStats.trackBytes > 64_000L
+        val fromDisk = uriScheme == "file" || uriScheme == "ytvcache"
+        val status = when {
+            fromDisk && player.isPlaying -> "С диска · офлайн"
+            fromDisk && buffering -> "С диска · подготовка…"
+            resolving && hasDisk -> "Открываем кэш…"
+            resolving -> "Открываем поток…"
+            uriScheme == "youtubevoice" && !busy && hasDisk ->
+                "Кэш есть · нажмите Play"
+            uriScheme == "youtubevoice" && !busy ->
+                "Нет потока · нужна сеть для первой загрузки"
+            buffering && waitingToPlay -> "Буферизация…"
+            buffering && player.isPlaying -> "Докачка буфера…"
+            waitingToPlay && player.playbackState == Player.STATE_IDLE -> "Подготовка…"
+            downloading -> "Качает в кэш…"
+            else -> null
+        }
         _uiState.update {
             it.copy(
                 isPlaying = player.isPlaying,
+                isPlayerBusy = busy || downloading,
+                playerStatus = status,
                 positionMs = player.currentPosition.coerceAtLeast(0L),
-                durationMs = player.duration.takeIf { d -> d > 0 } ?: 0L,
+                // Offline excerpt duration is only cached segs — prefer catalog length.
+                durationMs = when {
+                    trackDurationMs > 0L && playerDuration > 0L ->
+                        maxOf(trackDurationMs, playerDuration)
+                    trackDurationMs > 0L -> trackDurationMs
+                    playerDuration > 0L -> playerDuration
+                    else -> 0L
+                },
                 currentTrack = track ?: it.currentTrack,
                 shuffle = player.shuffleModeEnabled,
                 repeatMode = player.repeatMode,
@@ -1244,32 +1306,79 @@ class PlayerViewModel : ViewModel() {
         cacheStatsJob = viewModelScope.launch {
             while (isActive) {
                 refreshCacheStats()
-                delay(4_000)
+                val busy = _uiState.value.isPlayerBusy || _uiState.value.cacheStats.isDownloading
+                delay(if (busy) 1_500 else 4_000)
             }
         }
     }
 
     private fun refreshCacheStats() {
         viewModelScope.launch {
-            val trackId = _uiState.value.currentTrack?.id
+            val track = _uiState.value.currentTrack
+            val trackId = track?.id
+            val positionMs = controller?.currentPosition?.coerceAtLeast(0L)
+                ?: _uiState.value.positionMs
             val buffered = controller?.bufferedPosition?.coerceAtLeast(0L)
                 ?: _uiState.value.cacheStats.bufferedPositionMs
-            val snap = withContext(Dispatchers.IO) {
-                runCatching { AudioCacheStore.snapshot(trackId) }.getOrNull()
-            } ?: return@launch
+            val (snap, progress) = withContext(Dispatchers.IO) {
+                val s = runCatching { AudioCacheStore.snapshot(trackId) }.getOrNull()
+                val p = if (trackId != null) {
+                    runCatching {
+                        TrackCacheProgress.snapshot(trackId, track?.durationSeconds ?: 0L)
+                    }.getOrNull()
+                } else {
+                    null
+                }
+                s to p
+            }
+            if (snap == null) return@launch
+            val downloading = if (trackId != null && trackId == lastTrackIdForDownload) {
+                lastTrackBytesForDownload >= 0L && snap.trackBytes > lastTrackBytesForDownload + 32_768L
+            } else {
+                false
+            }
+            lastTrackIdForDownload = trackId
+            lastTrackBytesForDownload = snap.trackBytes
+            val ahead = progress?.cachedAheadOf(positionMs) ?: 0L
+            val diskUntil = progress?.diskUntilMs(positionMs) ?: 0L
             _uiState.update {
+                val status = when {
+                    downloading && progress != null && progress.expectedSegments > 0 ->
+                        "Докачка ${progress.uniqueSegments}/${progress.expectedSegments} сегм." +
+                            if (diskUntil > 0) " · до ${formatCacheTime(diskUntil)}" else ""
+                    downloading -> "Качает в кэш…"
+                    it.playerStatus?.startsWith("Докачка") == true && !downloading -> null
+                    it.playerStatus == "Качает в кэш…" && !downloading -> null
+                    else -> it.playerStatus
+                }
                 it.copy(
+                    isPlayerBusy = it.isPlayerBusy || downloading,
+                    playerStatus = status,
                     cacheStats = CacheUiStats(
                         totalBytes = snap.totalBytes,
                         totalKeys = snap.totalKeys,
                         maxBytes = snap.maxBytes,
                         trackBytes = snap.trackBytes,
                         trackKeys = snap.trackKeys,
+                        uniqueSegments = progress?.uniqueSegments ?: 0,
+                        expectedSegments = progress?.expectedSegments ?: 0,
+                        cachedApproxMs = progress?.cachedApproxMs ?: 0L,
+                        cachedAheadMs = ahead,
+                        diskUntilMs = diskUntil,
+                        trackComplete = progress?.isComplete == true,
                         bufferedPositionMs = buffered,
+                        isDownloading = downloading,
                     )
                 )
             }
         }
+    }
+
+    private fun formatCacheTime(ms: Long): String {
+        val totalSec = (ms / 1000).toInt().coerceAtLeast(0)
+        val m = totalSec / 60
+        val s = totalSec % 60
+        return "%d:%02d".format(m, s)
     }
 
     override fun onCleared() {
