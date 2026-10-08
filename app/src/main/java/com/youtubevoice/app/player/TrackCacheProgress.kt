@@ -44,13 +44,28 @@ object TrackCacheProgress {
             return g * OfflinePlayback.SEG_MS
         }
 
-        /** Contiguous cached media starting at [positionMs], in ms. */
+        /**
+         * Contiguous cached media starting at [positionMs], in ms.
+         * Tolerates up to 2 missing gosq holes so sparse CDN keys still count as ahead.
+         */
         fun cachedAheadOf(positionMs: Long): Long {
             if (gosqList.isEmpty()) return 0L
             val start = (positionMs.coerceAtLeast(0L) / OfflinePlayback.SEG_MS)
             val set = gosqList.toHashSet()
             var g = start
-            while (set.contains(g)) g++
+            var holeBudget = 2
+            while (true) {
+                if (set.contains(g)) {
+                    g++
+                    continue
+                }
+                if (holeBudget > 0 && set.contains(g + 1)) {
+                    holeBudget--
+                    g += 2
+                    continue
+                }
+                break
+            }
             return ((g - start) * OfflinePlayback.SEG_MS).coerceAtLeast(0L)
         }
 
@@ -91,5 +106,8 @@ object TrackCacheProgress {
 
     fun gosqOf(cacheKeyOrUrl: String): Long? =
         Regex("gosq/(\\d+)").find(cacheKeyOrUrl)?.groupValues?.get(1)?.toLongOrNull()
+            ?: Regex("""[?&/]gosq=(\d+)""").find(cacheKeyOrUrl)?.groupValues?.get(1)?.toLongOrNull()
             ?: Regex("""\|g(\d+)\|""").find(cacheKeyOrUrl)?.groupValues?.get(1)?.toLongOrNull()
+            ?: Regex("""[?&/](?:sq|sequence)=(\d+)""").find(cacheKeyOrUrl)?.groupValues?.get(1)?.toLongOrNull()
+            ?: Regex("""\|sq(\d+)\|""").find(cacheKeyOrUrl)?.groupValues?.get(1)?.toLongOrNull()
 }

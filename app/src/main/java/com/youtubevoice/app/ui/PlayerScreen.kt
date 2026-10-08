@@ -795,7 +795,7 @@ private fun NowPlayingPanel(
                         } else if (stats.trackKeys > 0) {
                             append(" · ${stats.trackKeys} сегм.")
                         }
-                        append(" · всего ${stats.totalMbLabel}/${stats.maxMbLabel} МБ")
+                        append(" · занято ${stats.totalMbLabel} / лимит ${stats.maxMbLabel} МБ")
                         if (stats.isDownloading) append(" · качает")
                     },
                     style = MaterialTheme.typography.labelSmall,
@@ -1842,7 +1842,7 @@ private fun SettingsSheet(
                 )
             }
             Text(
-                text = "Пока играет (в т.ч. в фоне) текущий трек докачивается сегментами в кэш (до ~32 МБ за проход, цикл пока FGS активен); соседние — по лимиту МБ ниже. Порядок задаёт, кого греть первым.",
+                text = "Текущий трек докачивается от позиции до конца (пачками до ~64 МБ, пока не заполнен или не упрётесь в лимит кэша). Соседние — только после запаса ~90 с вперёд и по лимиту «МБ на соседний». Порядок задаёт, кого греть первым.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
