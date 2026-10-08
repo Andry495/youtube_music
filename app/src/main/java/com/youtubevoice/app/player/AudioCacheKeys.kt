@@ -108,7 +108,10 @@ object AudioCacheKeys {
             ?: Regex("""\|(\d{3})\|""").find(cacheKey)?.groupValues?.get(1)
             ?: "?"
         val gosq = Regex("gosq/(\\d+)").find(cacheKey)?.groupValues?.get(1)
+            ?: Regex("""[?&/]gosq=(\d+)""").find(cacheKey)?.groupValues?.get(1)
             ?: Regex("""\|g(\d+)\|""").find(cacheKey)?.groupValues?.get(1)
+            ?: Regex("""[?&/](?:sq|sequence)=(\d+)""").find(cacheKey)?.groupValues?.get(1)
+            ?: Regex("""\|sq(\d+)\|""").find(cacheKey)?.groupValues?.get(1)
         val begin = Regex("/begin/(\\d+)").find(cacheKey)?.groupValues?.get(1)
             ?: Regex("""\|b(\d+)\|""").find(cacheKey)?.groupValues?.get(1)
         val seq = when {

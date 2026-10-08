@@ -19,9 +19,10 @@ private val Context.streamUrlStore by preferencesDataStore("stream_url_cache")
 object StreamUrlStore {
     private val KEY_MAP = stringPreferencesKey("by_track_json")
     private val hydrateMutex = Mutex()
+    private const val MAX_ENTRIES = 200
 
     @Volatile
-    private var memory = mapOf<String, ResolvedAudio>()
+    private var memory: LinkedHashMap<String, ResolvedAudio> = LinkedHashMap()
 
     @Volatile
     private var hydrated = false
@@ -31,7 +32,7 @@ object StreamUrlStore {
             if (hydrated) return
             val raw = context.applicationContext.streamUrlStore.data.first()[KEY_MAP]
             if (raw != null) {
-                memory = runCatching { decode(raw) }.getOrDefault(emptyMap())
+                memory = LinkedHashMap(runCatching { decode(raw) }.getOrDefault(emptyMap()))
             }
             hydrated = true
         }
@@ -42,18 +43,38 @@ object StreamUrlStore {
         if (!hydrated) hydrate(context)
     }
 
-    fun peek(trackId: String): ResolvedAudio? = memory[trackId]
+    fun peek(trackId: String): ResolvedAudio? = synchronized(this) {
+        val value = memory[trackId] ?: return null
+        // Touch for LRU: move to end.
+        memory.remove(trackId)
+        memory[trackId] = value
+        value
+    }
+
+    suspend fun remove(context: Context, trackId: String) {
+        if (trackId.isBlank()) return
+        ensureHydrated(context)
+        hydrateMutex.withLock {
+            if (!memory.containsKey(trackId)) return
+            val next = LinkedHashMap(memory)
+            next.remove(trackId)
+            memory = next
+            context.applicationContext.streamUrlStore.edit { prefs ->
+                prefs[KEY_MAP] = encode(next)
+            }
+        }
+    }
 
     suspend fun save(context: Context, resolved: ResolvedAudio) {
         if (resolved.trackId.isBlank() || resolved.streamUrl.isBlank()) return
         ensureHydrated(context)
         hydrateMutex.withLock {
-            val next = memory.toMutableMap()
+            val next = LinkedHashMap(memory)
+            next.remove(resolved.trackId)
             next[resolved.trackId] = resolved
-            // Cap map size — keep most recently saved entries.
-            if (next.size > 80) {
-                val drop = next.keys.take(next.size - 80)
-                drop.forEach { next.remove(it) }
+            while (next.size > MAX_ENTRIES) {
+                val oldest = next.keys.firstOrNull() ?: break
+                next.remove(oldest)
             }
             memory = next
             hydrated = true
