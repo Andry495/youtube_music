@@ -796,23 +796,52 @@ private fun NowPlayingPanel(
                             append(" · ${stats.trackKeys} сегм.")
                         }
                         append(" · занято ${stats.totalMbLabel} / лимит ${stats.maxMbLabel} МБ")
-                        if (stats.isDownloading) append(" · качает")
                     },
                     style = MaterialTheme.typography.labelSmall,
-                    color = if (stats.isDownloading) {
-                        MaterialTheme.colorScheme.primary
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    },
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 2.dp)
                 )
+                if (stats.isDownloading) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(12.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Text(
+                            text = buildString {
+                                append("Фоновая докачка кэша")
+                                if (stats.expectedSegments > 0) {
+                                    append(
+                                        " · ${stats.uniqueSegments}/${stats.expectedSegments} сегм."
+                                    )
+                                }
+                                if (stats.diskUntilMs > 0L) {
+                                    append(" · до ${formatTime(stats.diskUntilMs)}")
+                                }
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
                 LinearProgressIndicator(
                     progress = { stats.diskFill },
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(top = 4.dp)
                         .height(3.dp),
-                    color = MaterialTheme.colorScheme.secondary,
+                    color = if (stats.isDownloading) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.secondary
+                    },
                     trackColor = MaterialTheme.colorScheme.surfaceVariant,
                 )
             }
@@ -1842,34 +1871,55 @@ private fun SettingsSheet(
                 )
             }
             Text(
-                text = "Текущий трек докачивается от позиции до конца (пачками до ~64 МБ, пока не заполнен или не упрётесь в лимит кэша). Соседние — только после запаса ~90 с вперёд и по лимиту «МБ на соседний». Порядок задаёт, кого греть первым.",
+                text = "Окно = то, что ещё надо проиграть: от позиции (± небольшой back-buffer) вперёд по текущему треку, потом следующие. Уже сыгранное не качаем. Стоп — лимит кэша или число треков «вперёд».",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    text = "Макс. размер кэша",
+                    style = MaterialTheme.typography.titleMedium
+                )
+                Text(
+                    text = buildString {
+                        append("Свободно на телефоне: ${cacheStats.freeDeviceLabel}")
+                        if (cacheStats.allocatableCacheMb > 0) {
+                            append(" · можно выделить до ~${cacheStats.allocatableCacheMb} МБ")
+                        }
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    CacheSettingsStore.MAX_MB_OPTIONS.forEach { mb ->
+                        val tight = cacheStats.allocatableCacheMb in 1 until mb
+                        FilterChip(
+                            selected = cacheSettings.maxCacheMb == mb,
+                            onClick = {
+                                onCacheSettingsChange { it.copy(maxCacheMb = mb) }
+                            },
+                            label = {
+                                Text(if (tight) "$mb МБ · мало места" else "$mb МБ")
+                            }
+                        )
+                    }
+                }
+            }
             SettingsChipGroup(
-                title = "Макс. размер кэша",
-                options = CacheSettingsStore.MAX_MB_OPTIONS.map { it to "$it МБ" },
-                selected = cacheSettings.maxCacheMb,
-                onSelect = { mb -> onCacheSettingsChange { it.copy(maxCacheMb = mb) } }
-            )
-            SettingsChipGroup(
-                title = "Предзагрузка вперёд",
+                title = "Треков вперёд",
                 options = CacheSettingsStore.PREFETCH_AHEAD_OPTIONS.map { it to "$it" },
                 selected = cacheSettings.prefetchAhead,
                 onSelect = { n -> onCacheSettingsChange { it.copy(prefetchAhead = n) } }
             )
             SettingsChipGroup(
-                title = "Предзагрузка назад",
+                title = "Треков назад (держать в окне)",
                 options = CacheSettingsStore.PREFETCH_BEHIND_OPTIONS.map { it to "$it" },
                 selected = cacheSettings.prefetchBehind,
                 onSelect = { n -> onCacheSettingsChange { it.copy(prefetchBehind = n) } }
-            )
-            SettingsChipGroup(
-                title = "МБ на соседний трек",
-                options = CacheSettingsStore.PREFETCH_MB_OPTIONS.map { it to "$it МБ" },
-                selected = cacheSettings.prefetchMbPerTrack,
-                onSelect = { mb -> onCacheSettingsChange { it.copy(prefetchMbPerTrack = mb) } }
             )
 
             Text(
@@ -1922,7 +1972,7 @@ private fun SettingsSheet(
                 text = when (cacheSettings.prefetchOrder) {
                     CachePrefetchOrder.AHEAD -> "Сначала следующие треки"
                     CachePrefetchOrder.CURRENT_THEN_AHEAD -> "Сначала текущий, затем следующие"
-                    CachePrefetchOrder.AROUND -> "Вокруг текущего: назад и вперёд"
+                    CachePrefetchOrder.AROUND -> "Качать вперёд; назад только держать в окне"
                 },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant

@@ -70,6 +70,18 @@ object TrackCacheProgress {
         }
 
         /**
+         * True when everything still to play from [positionMs] to the end is on disk.
+         * Already-played prefix does not need to be complete.
+         */
+        fun upcomingComplete(positionMs: Long): Boolean {
+            if (durationMs <= 0L) return isComplete
+            val pos = positionMs.coerceIn(0L, durationMs)
+            val remaining = durationMs - pos
+            if (remaining <= 0L) return true
+            return cachedAheadOf(pos) + 20_000L >= remaining
+        }
+
+        /**
          * Furthest timeline point covered by disk for UI: contiguous from 0,
          * or (position + ahead) when mid-track fill is ahead of a gap.
          */
