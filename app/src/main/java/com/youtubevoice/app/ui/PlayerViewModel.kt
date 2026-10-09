@@ -1,11 +1,13 @@
 package com.youtubevoice.app.ui
 
 import android.content.Intent
+import android.os.StatFs
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import com.youtubevoice.app.YoutubeVoiceApp
+import java.io.File
 import com.youtubevoice.app.auth.DeviceGoogleAccount
 import com.youtubevoice.app.data.ChannelBrowseTab
 import com.youtubevoice.app.data.ChannelPage
@@ -71,10 +73,21 @@ data class CacheUiStats(
     val bufferedPositionMs: Long = 0L,
     /** True while disk cache for the current track is growing between polls. */
     val isDownloading: Boolean = false,
+    /** Free bytes on the volume that holds the audio cache. */
+    val freeDeviceBytes: Long = 0L,
 ) {
     val totalMbLabel: String get() = formatMb(totalBytes)
     val maxMbLabel: String get() = formatMb(maxBytes)
     val trackMbLabel: String get() = formatMb(trackBytes)
+    val freeDeviceLabel: String get() = formatStorage(freeDeviceBytes)
+    /**
+     * Rough ceiling the user can dedicate to this cache without running out of disk:
+     * free space + bytes already used by our cache.
+     */
+    val allocatableCacheMb: Int
+        get() = ((freeDeviceBytes + totalBytes) / (1024L * 1024L))
+            .toInt()
+            .coerceAtLeast(0)
     val diskFill: Float
         get() = if (maxBytes > 0) (totalBytes.toFloat() / maxBytes).coerceIn(0f, 1f) else 0f
     val trackFill: Float
@@ -91,6 +104,16 @@ data class CacheUiStats(
                 mb >= 100 -> "%.0f".format(mb)
                 mb >= 10 -> "%.1f".format(mb)
                 else -> "%.2f".format(mb)
+            }
+        }
+
+        fun formatStorage(bytes: Long): String {
+            if (bytes <= 0L) return "—"
+            val gb = bytes / (1024.0 * 1024.0 * 1024.0)
+            return if (gb >= 1.0) {
+                "%.1f ГБ".format(gb)
+            } else {
+                "${formatMb(bytes)} МБ"
             }
         }
     }
@@ -153,6 +176,7 @@ class PlayerViewModel : ViewModel() {
     private var lastPersistAtMs = 0L
     private var lastTrackBytesForDownload: Long = -1L
     private var lastTrackIdForDownload: String? = null
+    private var lastTotalBytesForDownload: Long = -1L
     private var lastPlayingForPersist: Boolean? = null
     private var restoreAttempted = false
 
@@ -1240,31 +1264,27 @@ class PlayerViewModel : ViewModel() {
         val resolving = uriScheme == "youtubevoice"
         val buffering = player.playbackState == Player.STATE_BUFFERING || player.isLoading
         val waitingToPlay = player.playWhenReady && !player.isPlaying
-        val busy = resolving || buffering || waitingToPlay
+        // Busy = real playback wait only. Background cache fill must NOT block Play/Pause.
+        val busy = waitingToPlay && (buffering || resolving)
         val trackDurationMs = (track?.durationSeconds ?: 0L).coerceAtLeast(0L) * 1000L
         val playerDuration = player.duration.takeIf { d -> d > 0 } ?: 0L
-        val downloading = _uiState.value.cacheStats.isDownloading
         val hasDisk = _uiState.value.cacheStats.trackBytes > 64_000L
         val fromDisk = uriScheme == "file" || uriScheme == "ytvcache"
         val status = when {
             fromDisk && player.isPlaying -> "С диска · офлайн"
             fromDisk && buffering -> "С диска · подготовка…"
-            resolving && hasDisk -> "Открываем кэш…"
-            resolving -> "Открываем поток…"
-            uriScheme == "youtubevoice" && !busy && hasDisk ->
-                "Кэш есть · нажмите Play"
-            uriScheme == "youtubevoice" && !busy ->
-                "Нет потока · нужна сеть для первой загрузки"
+            resolving && hasDisk && waitingToPlay -> "Открываем кэш…"
+            resolving && waitingToPlay -> "Открываем поток…"
+            uriScheme == "youtubevoice" && hasDisk -> "Кэш есть · нажмите Play"
+            uriScheme == "youtubevoice" -> "Нет потока · нужна сеть для первой загрузки"
             buffering && waitingToPlay -> "Буферизация…"
-            buffering && player.isPlaying -> "Докачка буфера…"
             waitingToPlay && player.playbackState == Player.STATE_IDLE -> "Подготовка…"
-            downloading -> "Качает в кэш…"
             else -> null
         }
         _uiState.update {
             it.copy(
                 isPlaying = player.isPlaying,
-                isPlayerBusy = busy || downloading,
+                isPlayerBusy = busy,
                 playerStatus = status,
                 positionMs = player.currentPosition.coerceAtLeast(0L),
                 // Offline excerpt duration is only cached segs — prefer catalog length.
@@ -1320,7 +1340,7 @@ class PlayerViewModel : ViewModel() {
                 ?: _uiState.value.positionMs
             val buffered = controller?.bufferedPosition?.coerceAtLeast(0L)
                 ?: _uiState.value.cacheStats.bufferedPositionMs
-            val (snap, progress) = withContext(Dispatchers.IO) {
+            val (snap, progress, freeBytes) = withContext(Dispatchers.IO) {
                 val s = runCatching { AudioCacheStore.snapshot(trackId) }.getOrNull()
                 val p = if (trackId != null) {
                     runCatching {
@@ -1329,31 +1349,26 @@ class PlayerViewModel : ViewModel() {
                 } else {
                     null
                 }
-                s to p
+                val free = runCatching {
+                    freeBytesOnCacheVolume(YoutubeVoiceApp.instance)
+                }.getOrDefault(0L)
+                Triple(s, p, free)
             }
             if (snap == null) return@launch
-            val downloading = if (trackId != null && trackId == lastTrackIdForDownload) {
-                lastTrackBytesForDownload >= 0L && snap.trackBytes > lastTrackBytesForDownload + 32_768L
-            } else {
-                false
-            }
+            val trackGrowing = trackId != null &&
+                trackId == lastTrackIdForDownload &&
+                lastTrackBytesForDownload >= 0L &&
+                snap.trackBytes > lastTrackBytesForDownload + 32_768L
+            val totalGrowing = lastTotalBytesForDownload >= 0L &&
+                snap.totalBytes > lastTotalBytesForDownload + 32_768L
+            val downloading = trackGrowing || totalGrowing
             lastTrackIdForDownload = trackId
             lastTrackBytesForDownload = snap.trackBytes
+            lastTotalBytesForDownload = snap.totalBytes
             val ahead = progress?.cachedAheadOf(positionMs) ?: 0L
             val diskUntil = progress?.diskUntilMs(positionMs) ?: 0L
             _uiState.update {
-                val status = when {
-                    downloading && progress != null && progress.expectedSegments > 0 ->
-                        "Докачка ${progress.uniqueSegments}/${progress.expectedSegments} сегм." +
-                            if (diskUntil > 0) " · до ${formatCacheTime(diskUntil)}" else ""
-                    downloading -> "Качает в кэш…"
-                    it.playerStatus?.startsWith("Докачка") == true && !downloading -> null
-                    it.playerStatus == "Качает в кэш…" && !downloading -> null
-                    else -> it.playerStatus
-                }
                 it.copy(
-                    isPlayerBusy = it.isPlayerBusy || downloading,
-                    playerStatus = status,
                     cacheStats = CacheUiStats(
                         totalBytes = snap.totalBytes,
                         totalKeys = snap.totalKeys,
@@ -1368,10 +1383,18 @@ class PlayerViewModel : ViewModel() {
                         trackComplete = progress?.isComplete == true,
                         bufferedPositionMs = buffered,
                         isDownloading = downloading,
+                        freeDeviceBytes = freeBytes,
                     )
                 )
             }
         }
+    }
+
+    private fun freeBytesOnCacheVolume(context: android.content.Context): Long {
+        val path = File(context.cacheDir, "youtube_voice_audio").let { dir ->
+            if (dir.exists()) dir else context.cacheDir
+        }
+        return StatFs(path.absolutePath).availableBytes.coerceAtLeast(0L)
     }
 
     private fun formatCacheTime(ms: Long): String {

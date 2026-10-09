@@ -26,6 +26,7 @@ import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
+import android.content.pm.ApplicationInfo
 import com.youtubevoice.app.MainActivity
 import com.youtubevoice.app.YoutubeVoiceApp
 import com.youtubevoice.app.data.ResolvedAudio
@@ -89,6 +90,30 @@ class PlaybackService : MediaSessionService() {
     private val networkLost = AtomicBoolean(false)
     private val recoverInFlight = AtomicBoolean(false)
     private val errorRecoverAttempts = AtomicInteger(0)
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val debuggable =
+            (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+        if (debuggable && intent?.action == ACTION_DEBUG_SEEK) {
+            val exo = player
+            if (exo != null) {
+                val requested = intent.getLongExtra(EXTRA_SEEK_MS, -1L)
+                val dur = exo.duration
+                val pos = when {
+                    requested >= 0L -> requested
+                    // -1 → jump near end (60s before finish) for fill tests
+                    dur > 0L -> (dur - 60_000L).coerceAtLeast(0L)
+                    else -> -1L
+                }
+                if (pos >= 0L) {
+                    Log.i(TAG, "DEBUG_SEEK to ${pos}ms (dur=${dur}ms)")
+                    exo.seekTo(pos)
+                    restartPrefetch(exo.currentMediaItemIndex)
+                }
+            }
+        }
+        return super.onStartCommand(intent, flags, startId)
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -180,7 +205,7 @@ class PlaybackService : MediaSessionService() {
                 )
                 errorRecoverAttempts.set(0)
                 AudioCacheKeys.foregroundTrackId = mediaItem.mediaId
-                ensureResolved(mediaItem, index)
+                serviceScope.launch { ensureResolved(mediaItem, index) }
                 // Free outside window, then fill remaining for the new window.
                 rotateCacheForCenter(index)
             }
@@ -211,11 +236,34 @@ class PlaybackService : MediaSessionService() {
                 }
             }
 
+            override fun onPositionDiscontinuity(
+                oldPosition: Player.PositionInfo,
+                newPosition: Player.PositionInfo,
+                reason: Int
+            ) {
+                if (reason != Player.DISCONTINUITY_REASON_SEEK &&
+                    reason != Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT
+                ) {
+                    return
+                }
+                val jump = kotlin.math.abs(newPosition.positionMs - oldPosition.positionMs)
+                // Big scrub: drop in-flight warm of the old timeline, refill from new playhead.
+                if (jump >= PLAYHEAD_BACK_BUFFER_MS) {
+                    Log.i(
+                        TAG,
+                        "Seek discontinuity ${oldPosition.positionMs}→${newPosition.positionMs}ms " +
+                            "jump=${jump}ms — restart prefetch"
+                    )
+                    restartPrefetch(exoPlayer.currentMediaItemIndex)
+                }
+            }
+
             override fun onPlayerError(error: PlaybackException) {
                 Log.w(TAG, "Player error: ${error.errorCodeName}", error)
+                // Offline: recover from disk only — do not invalidate / wait on YouTube.
                 recoverCurrentTrack(
                     reason = "player_error:${error.errorCodeName}",
-                    forceInvalidate = true,
+                    forceInvalidate = isNetworkUsable(),
                     resumePlay = exoPlayer.playWhenReady
                 )
             }
@@ -336,8 +384,8 @@ class PlaybackService : MediaSessionService() {
             } else if (offline == null && staged == null && startTrack != null) {
                 ensureResolved(exo.getMediaItemAt(safeStart), safeStart)
             }
-            // Resolve URL for cache fill; if offline excerpt is incomplete, upgrade to HLS.
-            if (startTrack != null) {
+            // Resolve URL for cache fill; upgrade incomplete excerpt only when online.
+            if (startTrack != null && isNetworkUsable()) {
                 serviceScope.launch {
                     val url = resolveForPlayback(startTrack, allowStale = true) ?: return@launch
                     persistResolved(url)
@@ -361,9 +409,11 @@ class PlaybackService : MediaSessionService() {
         if (index !in 0 until exo.mediaItemCount) return
         serviceScope.launch {
             ensureResolved(exo.getMediaItemAt(index), index)
-            exo.seekToDefaultPosition(index)
-            exo.prepare()
-            exo.play()
+            if (exo.mediaItemCount > index) {
+                exo.seekToDefaultPosition(index)
+                exo.prepare()
+                exo.play()
+            }
             prefetchAround(index)
         }
     }
@@ -499,11 +549,35 @@ class PlaybackService : MediaSessionService() {
                 serviceScope.launch {
                     val position = exo.currentPosition.coerceAtLeast(0L)
                     ensureResolved(item, index)
+                    if (exo.mediaItemCount <= index) return@launch
+                    val after = exo.getMediaItemAt(index).localConfiguration?.uri?.scheme
+                    if (after == "youtubevoice") {
+                        Log.w(TAG, "resumeCurrent: still placeholder, no disk/URL for ${item.mediaId}")
+                        return@launch
+                    }
                     if (position > 0) exo.seekTo(index, position)
+                    exo.prepare()
                     exo.play()
                 }
             }
-            else -> exo.play() // file / ytvcache / https — already playable
+            "http", "https" -> {
+                // Prefer disk when offline so Play does not hang on dead CDN URLs.
+                if (!isNetworkUsable()) {
+                    serviceScope.launch {
+                        fallbackToOfflineCache("resume_offline")
+                        val now = player ?: return@launch
+                        val scheme = now.currentMediaItem?.localConfiguration?.uri?.scheme
+                        if (scheme == "file" || scheme == OfflinePlayback.SCHEME) {
+                            now.play()
+                        } else {
+                            Log.w(TAG, "resumeCurrent offline: no playable disk cache")
+                        }
+                    }
+                } else {
+                    exo.play()
+                }
+            }
+            else -> exo.play() // file / ytvcache — already playable
         }
     }
 
@@ -512,28 +586,21 @@ class PlaybackService : MediaSessionService() {
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onLost(network: Network) {
                 networkLost.set(true)
-                Log.i(TAG, "Network lost")
+                Log.i(TAG, "Network lost — fallback to disk cache if possible")
+                serviceScope.launch { fallbackToOfflineCache("network_lost") }
             }
 
             override fun onAvailable(network: Network) {
                 // Connectivity callbacks run off the main thread — never touch ExoPlayer here.
                 networkLost.set(false)
-                serviceScope.launch {
-                    if (!shouldForceRecover()) return@launch
-                    Log.i(TAG, "Network available — recovering playback")
-                    scheduleNetworkRecover()
-                }
+                serviceScope.launch { onNetworkRestored("available") }
             }
 
             override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
                 if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) return
                 if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) return
                 networkLost.set(false)
-                serviceScope.launch {
-                    if (!shouldForceRecover()) return@launch
-                    Log.i(TAG, "Network validated — recovering playback")
-                    scheduleNetworkRecover()
-                }
+                serviceScope.launch { onNetworkRestored("validated") }
             }
         }
         networkCallback = callback
@@ -594,6 +661,44 @@ class PlaybackService : MediaSessionService() {
         return exo.playerError != null
     }
 
+    /**
+     * Network is back: recover hard errors, upgrade incomplete offline→HLS in background,
+     * resume cache fill. Playback on a complete disk playlist is left alone.
+     */
+    private suspend fun onNetworkRestored(reason: String) {
+        if (shouldForceRecover()) {
+            Log.i(TAG, "Network $reason — recovering playback error")
+            scheduleNetworkRecover()
+        }
+        upgradeIncompleteOfflineInBackground()
+        val exo = player ?: return
+        if (exo.mediaItemCount > 0) {
+            restartPrefetch(exo.currentMediaItemIndex)
+        }
+    }
+
+    /** Incomplete file:// / ytvcache excerpt → real HLS once online (keeps position). */
+    private suspend fun upgradeIncompleteOfflineInBackground() {
+        if (!isNetworkUsable()) return
+        val exo = player ?: return
+        val index = exo.currentMediaItemIndex
+        if (index < 0 || index >= exo.mediaItemCount) return
+        val item = exo.getMediaItemAt(index)
+        val scheme = item.localConfiguration?.uri?.scheme
+        if (scheme != "file" && scheme != OfflinePlayback.SCHEME) return
+        if (!OfflinePlayback.isIncomplete(item)) return
+        val track = trackIndex[item.mediaId] ?: return
+        Log.i(TAG, "Network back — upgrade incomplete offline ${track.id} → stream")
+        val resolved = withTimeoutOrNull(20_000L) {
+            resolveForPlayback(track, allowStale = true)
+        } ?: run {
+            Log.w(TAG, "Upgrade resolve timed out for ${track.id}")
+            return
+        }
+        persistResolved(resolved)
+        upgradeOfflineToStream(track, index, resolved)
+    }
+
     private fun scheduleNetworkRecover() {
         recoverJob?.cancel()
         recoverJob = serviceScope.launch {
@@ -640,8 +745,9 @@ class PlaybackService : MediaSessionService() {
                 val diskBytes = withContext(Dispatchers.IO) {
                     AudioCacheStore.cachedBytesForTrack(track.id)
                 }
-                // Offline-first recovery: play what we already have on disk.
-                if (diskBytes > 0L && attempts == 1) {
+                val offlineOk = !isNetworkUsable() || attempts <= 2
+                // Offline-first: play disk whenever we can (always when network is down).
+                if (diskBytes > 0L && offlineOk) {
                     val offline = withContext(Dispatchers.IO) {
                         OfflinePlayback.buildMediaItem(this@PlaybackService, track)
                     }
@@ -655,24 +761,25 @@ class PlaybackService : MediaSessionService() {
                         exo.prepare()
                         if (position > 0) exo.seekTo(index, position)
                         if (resumePlay) exo.play()
-                        // Keep filling: refresh stream URL in background for warmCache.
-                        serviceScope.launch {
-                            runCatching {
-                                withContext(Dispatchers.IO) {
-                                    repository.invalidate(track.id)
-                                    repository.resolveAudio(track.id, track.watchUrl)
+                        if (isNetworkUsable()) {
+                            serviceScope.launch {
+                                runCatching {
+                                    withContext(Dispatchers.IO) {
+                                        repository.resolveAudio(track.id, track.watchUrl)
+                                    }
+                                }.onSuccess { resolved ->
+                                    persistResolved(resolved)
+                                    Log.i(TAG, "Fill URL refreshed for ${track.id} after offline recover")
                                 }
-                            }.onSuccess { resolved ->
-                                persistResolved(resolved)
-                                Log.i(TAG, "Fill URL refreshed for ${track.id} after offline recover")
+                                prefetchAround(index)
                             }
-                            prefetchAround(index)
                         }
                         prefetchAround(index)
                         return@launch
                     }
+                    // Saved HTTPS URL only helps when the network can reach the CDN.
                     val saved = StreamUrlStore.peek(track.id)
-                    if (saved != null) {
+                    if (saved != null && isNetworkUsable()) {
                         Log.i(
                             TAG,
                             "Recovering ${track.id} from saved URL (disk=${diskBytes}B, $reason)"
@@ -686,6 +793,10 @@ class PlaybackService : MediaSessionService() {
                         refreshResolvedInBackground(track, index)
                         return@launch
                     }
+                }
+                if (!isNetworkUsable()) {
+                    Log.w(TAG, "Recovery aborted offline for ${track.id} ($reason)")
+                    return@launch
                 }
                 if (forceInvalidate) {
                     repository.invalidate(track.id)
@@ -706,8 +817,7 @@ class PlaybackService : MediaSessionService() {
                 prefetchAround(index)
             } catch (t: Exception) {
                 Log.w(TAG, "Recovery failed ($reason)", t)
-                // Retry once more shortly if network may still be settling
-                if (attempts < MAX_ERROR_RECOVERIES) {
+                if (attempts < MAX_ERROR_RECOVERIES && isNetworkUsable()) {
                     delay(1_500)
                     recoverInFlight.set(false)
                     recoverCurrentTrack(reason, forceInvalidate = true, resumePlay = resumePlay)
@@ -717,6 +827,35 @@ class PlaybackService : MediaSessionService() {
                 recoverInFlight.set(false)
             }
         }
+    }
+
+    /** Switch current https/hls item to a local offline playlist when cache exists. */
+    private suspend fun fallbackToOfflineCache(reason: String) {
+        val exo = player ?: return
+        val index = exo.currentMediaItemIndex
+        if (index < 0 || index >= exo.mediaItemCount) return
+        val item = exo.getMediaItemAt(index)
+        val scheme = item.localConfiguration?.uri?.scheme
+        if (scheme == "file" || scheme == OfflinePlayback.SCHEME) return
+        val track = trackIndex[item.mediaId] ?: return
+        val offline = withContext(Dispatchers.IO) {
+            OfflinePlayback.buildMediaItem(this@PlaybackService, track)
+        } ?: return
+        val position = exo.currentPosition.coerceAtLeast(0L)
+        val wasPlaying = exo.isPlaying || exo.playWhenReady
+        Log.i(TAG, "fallbackToOfflineCache ${track.id} ($reason) pos=${position}ms")
+        exo.replaceMediaItem(index, offline)
+        exo.prepare()
+        if (position > 0) exo.seekTo(index, position)
+        if (wasPlaying) exo.play()
+    }
+
+    private fun isNetworkUsable(): Boolean {
+        if (networkLost.get()) return false
+        val cm = getSystemService(ConnectivityManager::class.java) ?: return true
+        val network = cm.activeNetwork ?: return false
+        val caps = cm.getNetworkCapabilities(network) ?: return false
+        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
     }
 
     fun reloadCacheSettings() {
@@ -740,11 +879,16 @@ class PlaybackService : MediaSessionService() {
                     swappableDataSourceFactory.delegate =
                         DefaultDataSource.Factory(this@PlaybackService, cacheFactory)
                 }
+                val exo = player
                 Log.i(
                     TAG,
                     "Cache settings reloaded maxMb=${CacheSettingsStore.current().maxCacheMb} " +
                         "keys=${AudioCacheStore.keyCount()} bytes=${AudioCacheStore.cachedBytes()}"
                 )
+                // New room under a larger ceiling — resume fill immediately (no seek needed).
+                if (exo != null && exo.mediaItemCount > 0) {
+                    restartPrefetch(exo.currentMediaItemIndex)
+                }
             }
         }
     }
@@ -827,6 +971,13 @@ class PlaybackService : MediaSessionService() {
         }
     }
 
+    /** Cancel in-flight fill and start again from the current playhead. */
+    private fun restartPrefetch(centerIndex: Int) {
+        prefetchJob?.cancel()
+        prefetchCenter = -1
+        prefetchAround(centerIndex)
+    }
+
     private fun prefetchAround(centerIndex: Int) {
         // Already filling this center — keep the running job (background continuous fill).
         if (prefetchJob?.isActive == true && prefetchCenter == centerIndex) return
@@ -860,10 +1011,11 @@ class PlaybackService : MediaSessionService() {
     }
 
     /**
-     * One pass over the prefetch window. Returns true if any bytes were written to cache.
+     * One pass over the play-ahead window. Returns true if any bytes were written.
      *
-     * Current (playing): fill from playback position forward until track is complete.
-     * Next tracks in the window: only after current has enough ahead; one-by-one.
+     * Anchor = playback position (play or pause). Already-played audio is ignored except a
+     * small back-buffer. Download what still needs to play: remainder of current, then next
+     * tracks in order, until [CacheSettings.maxCacheMb] is full or ahead-track count ends.
      */
     private suspend fun runPrefetchPass(centerIndex: Int): Boolean {
         val exo = player ?: return false
@@ -871,24 +1023,15 @@ class PlaybackService : MediaSessionService() {
         if (last < 0) return false
         retainCacheWindow(centerIndex)
         val settings = CacheSettingsStore.current()
+        // Fill only current + ahead (never spend budget on playlist-behind / already played).
         val order = prefetchIndexes(centerIndex, exo.mediaItemCount, settings)
         var wroteAny = false
 
-        val currentTrack = trackIndex[exo.getMediaItemAt(centerIndex).mediaId]
         val positionMs = if (exo.currentMediaItemIndex == centerIndex) {
             exo.currentPosition.coerceAtLeast(0L)
         } else {
             0L
         }
-        val currentProgress = currentTrack?.let {
-            withContext(Dispatchers.IO) {
-                TrackCacheProgress.snapshot(it.id, it.durationSeconds)
-            }
-        }
-        val currentAhead = currentProgress?.cachedAheadOf(positionMs) ?: 0L
-        val currentReadyForNeighbors = currentProgress == null ||
-            currentProgress.isComplete ||
-            currentAhead >= MIN_AHEAD_MS_BEFORE_NEIGHBOR
 
         for (index in order) {
             coroutineContext.ensureActive()
@@ -897,44 +1040,37 @@ class PlaybackService : MediaSessionService() {
             val track = trackIndex[item.mediaId] ?: continue
             val uri = item.localConfiguration?.uri
             val isCurrent = index == centerIndex && exo.currentMediaItemIndex == centerIndex
-            // Fill current completely even while paused; neighbors after ahead gate.
-            val fillCurrent = isCurrent
 
-            // Sequential window: finish current ahead-buffer before next tracks.
-            if (!isCurrent && !currentReadyForNeighbors) {
-                Log.i(
-                    TAG,
-                    "Prefetch hold next ${track.id}: current ahead=${currentAhead}ms " +
-                        "(need ${MIN_AHEAD_MS_BEFORE_NEIGHBOR}ms)"
-                )
+            val room = withContext(Dispatchers.IO) {
+                settings.maxCacheBytes - AudioCacheStore.cachedBytes()
+            }
+            if (room < 256L * 1024L) {
+                Log.i(TAG, "Prefetch stop: cache full room=${room}B max=${settings.maxCacheMb}MB")
                 break
             }
-            if (fillCurrent) {
-                val cur = currentProgress ?: withContext(Dispatchers.IO) {
-                    TrackCacheProgress.snapshot(track.id, track.durationSeconds)
-                }
-                if (cur.isComplete) continue
+
+            val progress = withContext(Dispatchers.IO) {
+                TrackCacheProgress.snapshot(track.id, track.durationSeconds)
             }
-            if (!isCurrent) {
-                val neighborBytes = withContext(Dispatchers.IO) {
-                    AudioCacheStore.cachedBytesForTrack(track.id)
-                }
-                val neighborProgress = withContext(Dispatchers.IO) {
-                    TrackCacheProgress.snapshot(track.id, track.durationSeconds)
-                }
-                if (neighborProgress.isComplete ||
-                    neighborBytes >= settings.prefetchBytesPerTrack
-                ) {
-                    continue
-                }
+            // Current: only need playhead→end. Next tracks: full file still to play.
+            val done = if (isCurrent) {
+                progress.upcomingComplete(positionMs)
+            } else {
+                progress.isComplete
             }
+            if (done) continue
+
+            Log.i(
+                TAG,
+                "Prefetch fill ${track.id} current=$isCurrent fromPos=${positionMs}ms " +
+                    "toward maxCache=${settings.maxCacheMb}MB room=${room / (1024 * 1024)}MB"
+            )
 
             try {
                 val resolved = when (uri?.scheme) {
-                    "http", "https" -> null // use uri below
+                    "http", "https" -> null
                     else -> {
-                        // youtubevoice / file / ytvcache — need stream URL to download.
-                        if (fillCurrent) {
+                        if (isCurrent) {
                             resolveForPlayback(track, allowStale = true)
                         } else {
                             withTimeoutOrNull(12_000L) {
@@ -948,11 +1084,10 @@ class PlaybackService : MediaSessionService() {
                         }
                     }
                 }
-                // Always keep a fill URL: live item, resolve, or last saved (even if stale).
                 val streamUrl = when {
                     uri?.scheme == "http" || uri?.scheme == "https" -> uri.toString()
                     resolved != null -> {
-                        if (!fillCurrent &&
+                        if (!isCurrent &&
                             uri?.scheme == "youtubevoice" &&
                             exo.mediaItemCount > index &&
                             trackIndex[track.id]?.id == track.id
@@ -968,8 +1103,9 @@ class PlaybackService : MediaSessionService() {
                     continue
                 }
 
-                val fromMs = if (fillCurrent) {
-                    (positionMs - 10_000L).coerceAtLeast(0L)
+                // Current: from playhead with a small back-buffer; next tracks from the start.
+                val fromMs = if (isCurrent) {
+                    (positionMs - PLAYHEAD_BACK_BUFFER_MS).coerceAtLeast(0L)
                 } else {
                     0L
                 }
@@ -984,7 +1120,7 @@ class PlaybackService : MediaSessionService() {
                             warmCache(
                                 trackId = track.id,
                                 streamUrl = streamUrl,
-                                fillCompletely = fillCurrent,
+                                fillCompletely = true,
                                 fromPositionMs = fromMs,
                                 trackDurationMs = track.durationSeconds.coerceAtLeast(0L) * 1000L,
                             )
@@ -998,9 +1134,7 @@ class PlaybackService : MediaSessionService() {
                     wrote = (afterBytes - beforeBytes).coerceAtLeast(0L)
                     Log.w(TAG, "Prefetch warm timed out for ${track.id} delta=${wrote}B")
                 }
-                // Dead playlist: re-resolve only when warm wrote nothing without a soft timeout.
-                // Timeout still leaves bytes on disk — do not invalidate a working URL.
-                if (wrote <= 0L && fillCurrent && !timedOut) {
+                if (wrote <= 0L && !timedOut) {
                     Log.i(TAG, "Prefetch refresh URL for ${track.id} after empty warm")
                     withContext(Dispatchers.IO) {
                         repository.invalidate(track.id)
@@ -1046,17 +1180,10 @@ class PlaybackService : MediaSessionService() {
                         Log.w(TAG, "Prefetch refresh failed for ${track.id} — will retry later")
                     }
                 }
-                if (wrote > 0) wroteAny = true
-
-                // Keep hammering current until ahead buffer or complete — then neighbors.
-                if (fillCurrent) {
-                    val after = withContext(Dispatchers.IO) {
-                        TrackCacheProgress.snapshot(track.id, track.durationSeconds)
-                    }
-                    val ahead = after.cachedAheadOf(positionMs)
-                    if (!after.isComplete && ahead < MIN_AHEAD_MS_BEFORE_NEIGHBOR) {
-                        break
-                    }
+                if (wrote > 0) {
+                    wroteAny = true
+                    // One writing target per pass; next loop continues the same or next track.
+                    break
                 }
             } catch (t: Throwable) {
                 if (t is kotlinx.coroutines.CancellationException) throw t
@@ -1110,19 +1237,14 @@ class PlaybackService : MediaSessionService() {
         val already = AudioCacheStore.cachedBytesForTrack(trackId)
         val room = (CacheSettingsStore.current().maxCacheBytes - AudioCacheStore.cachedBytes())
             .coerceAtLeast(0L)
-        val budget = if (fillCompletely) {
-            // Resume past already-cached prefix; fill toward cache ceiling in 64MB passes.
-            minOf(64L * 1024L * 1024L, room.coerceAtLeast(1L * 1024L * 1024L))
-        } else {
-            (AudioCacheStore.prefetchBytesPerTrack() - already).coerceAtLeast(0L)
-        }
-        if (budget <= 0L) return 0L
+        val budget = minOf(64L * 1024L * 1024L, room.coerceAtLeast(1L * 1024L * 1024L))
+        if (budget <= 0L || room <= 0L) return 0L
         var written = 0L
         val dataSource = factory.createDataSource()
         val dataSpec = DataSpec.Builder()
             .setUri(streamUrl)
             .setKey(trackId)
-            .setPosition(if (fillCompletely) already else 0L)
+            .setPosition(already)
             .setLength(budget)
             .build()
         CacheWriter(
@@ -1176,7 +1298,7 @@ class PlaybackService : MediaSessionService() {
         Log.i(
             TAG,
             "HLS warm start $trackId full=$fillCompletely fromGosq=$fromGosq " +
-                "maxSegs=$maxSegs budgetPass=${if (fillCompletely) "towardMaxCache" else "prefetchMb"}"
+                "maxSegs=$maxSegs budgetPass=towardMaxCache"
         )
         val playlistBody = withContext(Dispatchers.IO) {
             downloadText(playlistUrl, maxBytes = playlistCap)
@@ -1235,20 +1357,15 @@ class PlaybackService : MediaSessionService() {
         fromPositionMs: Long,
         trackDurationMs: Long,
     ): Long {
-        // Current: fill toward maxCacheMb in large passes; neighbors: remaining prefetchMb quota.
+        // Always fill toward remaining maxCache room (large passes).
         val room = (CacheSettingsStore.current().maxCacheBytes - AudioCacheStore.cachedBytes())
             .coerceAtLeast(0L)
-        val alreadyTrack = AudioCacheStore.cachedBytesForTrack(trackId)
-        var budget = if (fillCompletely) {
-            minOf(64L * 1024L * 1024L, room.coerceAtLeast(1L * 1024L * 1024L))
-        } else {
-            (AudioCacheStore.prefetchBytesPerTrack() - alreadyTrack).coerceAtLeast(0L)
-        }
+        var budget = minOf(64L * 1024L * 1024L, room.coerceAtLeast(if (fillCompletely) 1L * 1024L * 1024L else 0L))
         var warmed = 0
         var skippedCached = 0
         var writtenTotal = 0L
         if (budget <= 0L) {
-            Log.i(TAG, "HLS warm $trackId skip: budget=0 room=${room}B already=${alreadyTrack}B")
+            Log.i(TAG, "HLS warm $trackId skip: budget=0 room=${room}B")
             return 0L
         }
         for (segmentUrl in prioritized) {
@@ -1558,16 +1675,13 @@ class PlaybackService : MediaSessionService() {
                     }
                 }
             }
+            // Behind stays in retain window only — do not download already-played playlist items.
             CachePrefetchOrder.AROUND -> {
                 buildList {
                     add(center)
                     for (offset in 1..settings.prefetchAhead) {
                         val i = center + offset
                         if (i < count) add(i)
-                    }
-                    for (offset in 1..settings.prefetchBehind) {
-                        val i = center - offset
-                        if (i >= 0) add(i)
                     }
                 }
             }
@@ -1669,36 +1783,40 @@ class PlaybackService : MediaSessionService() {
         }
     }
 
-    private fun ensureResolved(mediaItem: MediaItem, index: Int) {
+    /**
+     * Swap [youtubevoice] placeholder for disk playlist (preferred) or stream URL.
+     * Suspends until the swap finishes so callers can play without racing the network.
+     */
+    private suspend fun ensureResolved(mediaItem: MediaItem, index: Int) {
         val uri = mediaItem.localConfiguration?.uri
         if (uri?.scheme != "youtubevoice") return
         val track = trackIndex[mediaItem.mediaId] ?: return
         if (!resolvingIds.add(track.id)) return
 
-        serviceScope.launch {
-            try {
-                val exo = player ?: return@launch
-                val wasPlaying = exo.isPlaying
-                val sameItem = exo.currentMediaItemIndex == index
-                val position = if (sameItem) exo.currentPosition.coerceAtLeast(0L) else 0L
+        try {
+            val exo = player ?: return
+            val wasPlaying = exo.isPlaying
+            val sameItem = exo.currentMediaItemIndex == index
+            val position = if (sameItem) exo.currentPosition.coerceAtLeast(0L) else 0L
 
-                // Disk first — never wait on YouTube just to start cached audio.
-                val offline = withContext(Dispatchers.IO) {
-                    OfflinePlayback.buildMediaItem(this@PlaybackService, track)
+            // Disk first — never wait on YouTube just to start cached audio.
+            val offline = withContext(Dispatchers.IO) {
+                OfflinePlayback.buildMediaItem(this@PlaybackService, track)
+            }
+            if (offline != null && exo.mediaItemCount > index) {
+                Log.i(
+                    TAG,
+                    "ensureResolved ${track.id} → disk cache " +
+                        "(${AudioCacheStore.cachedBytesForTrack(track.id)}B)"
+                )
+                exo.replaceMediaItem(index, offline)
+                if (sameItem) {
+                    exo.prepare()
+                    if (position > 0) exo.seekTo(index, position)
+                    if (wasPlaying || exo.playWhenReady) exo.play()
                 }
-                if (offline != null && exo.mediaItemCount > index) {
-                    Log.i(
-                        TAG,
-                        "ensureResolved ${track.id} → disk cache " +
-                            "(${AudioCacheStore.cachedBytesForTrack(track.id)}B)"
-                    )
-                    exo.replaceMediaItem(index, offline)
-                    if (sameItem) {
-                        exo.prepare()
-                        if (position > 0) exo.seekTo(index, position)
-                        if (wasPlaying || exo.playWhenReady) exo.play()
-                    }
-                    // Fill + upgrade incomplete excerpt to full HLS timeline when URL is ready.
+                // Upgrade incomplete excerpt only when online — offline must keep disk.
+                if (isNetworkUsable()) {
                     serviceScope.launch {
                         val resolved = resolveForPlayback(track, allowStale = true) ?: return@launch
                         persistResolved(resolved)
@@ -1706,26 +1824,31 @@ class PlaybackService : MediaSessionService() {
                             upgradeOfflineToStream(track, index, resolved)
                         }
                     }
-                    return@launch
                 }
-
-                val resolved = resolveForPlayback(track, allowStale = true) ?: return@launch
-                if (exo.mediaItemCount > index) {
-                    exo.replaceMediaItem(index, buildResolvedMediaItem(track, resolved))
-                    if (sameItem) {
-                        exo.prepare()
-                        if (position > 0) exo.seekTo(index, position)
-                        if (wasPlaying || exo.playWhenReady) exo.play()
-                    }
-                    if (resolved.expiresAtMs <= System.currentTimeMillis() + 60_000) {
-                        refreshResolvedInBackground(track, index)
-                    }
-                }
-            } catch (_: Exception) {
-                // keep placeholder; error surfaces if user tries to play
-            } finally {
-                resolvingIds.remove(track.id)
+                return
             }
+
+            if (!isNetworkUsable()) {
+                Log.w(TAG, "ensureResolved ${track.id}: no disk and offline — stay placeholder")
+                return
+            }
+
+            val resolved = resolveForPlayback(track, allowStale = true) ?: return
+            if (exo.mediaItemCount > index) {
+                exo.replaceMediaItem(index, buildResolvedMediaItem(track, resolved))
+                if (sameItem) {
+                    exo.prepare()
+                    if (position > 0) exo.seekTo(index, position)
+                    if (wasPlaying || exo.playWhenReady) exo.play()
+                }
+                if (resolved.expiresAtMs <= System.currentTimeMillis() + 60_000) {
+                    refreshResolvedInBackground(track, index)
+                }
+            }
+        } catch (_: Exception) {
+            // keep placeholder; error surfaces if user tries to play
+        } finally {
+            resolvingIds.remove(track.id)
         }
     }
 
@@ -1772,8 +1895,10 @@ class PlaybackService : MediaSessionService() {
     companion object {
         private const val TAG = "PlaybackService"
         private const val MAX_ERROR_RECOVERIES = 4
-        /** Do not start next-track prefetch until current has this much contiguous cache ahead. */
-        private const val MIN_AHEAD_MS_BEFORE_NEIGHBOR = 90_000L
+        const val ACTION_DEBUG_SEEK = "com.youtubevoice.app.action.DEBUG_SEEK"
+        const val EXTRA_SEEK_MS = "seek_ms"
+        /** Keep a little already-played audio; download window starts just before playhead. */
+        private const val PLAYHEAD_BACK_BUFFER_MS = 30_000L
         private const val ANDROID_UA =
             "com.google.android.youtube/21.03.36 (Linux; U; Android 14) gzip"
         private const val ANDROID_VR_UA =
