@@ -1,0 +1,9 @@
+---
+description: Never attribute commits to Cursor Agent in this repo
+alwaysApply: true
+---
+
+# No Cursor git attribution
+
+Follow the global rule: never add `Co-authored-by: Cursor` / cursoragent to commits or PRs.
+After every commit, check `git log -1 --format=%B` and strip Cursor trailers before push.
