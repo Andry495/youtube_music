@@ -198,6 +198,13 @@ class PlayerViewModel : ViewModel() {
         refreshAccountUi()
         if (auth.isSignedIn) {
             NewPipeDownloader.setAuthCookie(auth.session?.cookie)
+            viewModelScope.launch {
+                runCatching {
+                    val refreshed = auth.refreshSessionCookies()
+                    NewPipeDownloader.setAuthCookie(refreshed?.cookie ?: auth.session?.cookie)
+                    refreshAccountUi()
+                }
+            }
         }
         viewModelScope.launch {
             DpiSettingsStore.enabledFlow(YoutubeVoiceApp.instance).collectLatest { enabled ->
@@ -610,32 +617,47 @@ class PlayerViewModel : ViewModel() {
     }
 
     fun refreshLibrary() {
-        val cookie = requireCookie() ?: return
+        if (requireCookie() == null) return
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, error = null) }
             try {
-                val playlists = api.listMyPlaylists(cookie)
+                var cookie = requireFreshCookie() ?: return@launch
+                val playlists = try {
+                    api.listMyPlaylists(cookie)
+                } catch (first: Exception) {
+                    // One retry after forced cookie rotate — common right after WebView login.
+                    android.util.Log.w("YoutubeVoice", "listMyPlaylists failed, retry", first)
+                    runCatching { auth.refreshSessionCookies() }
+                    cookie = auth.session?.cookie ?: cookie
+                    NewPipeDownloader.setAuthCookie(cookie)
+                    api.listMyPlaylists(cookie)
+                }
                 _uiState.update {
                     it.copy(
                         isLoading = false,
                         libraryPlaylists = playlists,
                         mainTab = MainTab.LIBRARY,
-                        libraryTab = LibraryTab.PLAYLISTS
+                        libraryTab = LibraryTab.PLAYLISTS,
+                        error = null
                     )
                 }
             } catch (e: Exception) {
                 _uiState.update {
-                    it.copy(isLoading = false, error = e.message ?: "Не удалось загрузить плейлисты")
+                    it.copy(
+                        isLoading = false,
+                        error = e.message?.ifBlank { null } ?: "Не удалось загрузить плейлисты"
+                    )
                 }
             }
         }
     }
 
     fun refreshSubscriptions() {
-        val cookie = requireCookie() ?: return
+        if (requireCookie() == null) return
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, error = null) }
             try {
+                val cookie = requireFreshCookie() ?: return@launch
                 val subs = api.listMySubscriptions(cookie)
                 _uiState.update {
                     it.copy(
@@ -755,9 +777,10 @@ class PlayerViewModel : ViewModel() {
     }
 
     fun deletePlaylist(playlistId: String) {
-        val cookie = requireCookie() ?: return
+        if (requireCookie() == null) return
         viewModelScope.launch {
             try {
+                val cookie = requireFreshCookie() ?: return@launch
                 api.deletePlaylist(cookie, playlistId)
                 _uiState.update {
                     it.copy(
@@ -776,7 +799,7 @@ class PlayerViewModel : ViewModel() {
     }
 
     fun createPlaylist(title: String) {
-        val cookie = requireCookie() ?: return
+        if (requireCookie() == null) return
         val name = title.trim()
         if (name.isEmpty()) {
             _uiState.update { it.copy(error = "Введите название плейлиста") }
@@ -785,6 +808,7 @@ class PlayerViewModel : ViewModel() {
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, error = null) }
             try {
+                val cookie = requireFreshCookie() ?: return@launch
                 val created = api.createPlaylist(cookie, name)
                 _uiState.update {
                     it.copy(
@@ -812,10 +836,11 @@ class PlayerViewModel : ViewModel() {
     }
 
     fun addCurrentToPlaylist(playlistId: String) {
-        val cookie = requireCookie() ?: return
+        if (requireCookie() == null) return
         val videoId = _uiState.value.currentTrack?.id ?: return
         viewModelScope.launch {
             try {
+                val cookie = requireFreshCookie() ?: return@launch
                 api.addVideoToPlaylist(cookie, playlistId, videoId)
                 _uiState.update {
                     it.copy(
@@ -833,7 +858,7 @@ class PlayerViewModel : ViewModel() {
     }
 
     fun removeCurrentFromOpenPlaylist() {
-        val cookie = requireCookie() ?: return
+        if (requireCookie() == null) return
         val itemId = _uiState.value.currentTrack?.playlistItemId
         val playlistId = _uiState.value.playlist?.id
         if (itemId.isNullOrBlank() || playlistId.isNullOrBlank()) {
@@ -842,6 +867,7 @@ class PlayerViewModel : ViewModel() {
         }
         viewModelScope.launch {
             try {
+                val cookie = requireFreshCookie() ?: return@launch
                 api.removePlaylistItem(cookie, "$playlistId|$itemId")
                 val trackId = _uiState.value.currentTrack?.id
                 _uiState.update { state ->
@@ -858,11 +884,12 @@ class PlayerViewModel : ViewModel() {
     }
 
     fun rateCurrent(rating: VideoRating) {
-        val cookie = requireCookie() ?: return
+        if (requireCookie() == null) return
         val videoId = _uiState.value.currentTrack?.id ?: return
         val next = if (_uiState.value.currentRating == rating) VideoRating.NONE else rating
         viewModelScope.launch {
             try {
+                val cookie = requireFreshCookie() ?: return@launch
                 api.setRating(cookie, videoId, next)
                 _uiState.update {
                     it.copy(
@@ -881,9 +908,10 @@ class PlayerViewModel : ViewModel() {
     }
 
     fun toggleSubscribeCurrent() {
-        val cookie = requireCookie() ?: return
+        if (requireCookie() == null) return
         viewModelScope.launch {
             try {
+                val cookie = requireFreshCookie() ?: return@launch
                 var channelId = _uiState.value.currentTrack?.channelId
                 val videoId = _uiState.value.currentTrack?.id
                 if (channelId.isNullOrBlank() && videoId != null) {
@@ -938,9 +966,10 @@ class PlayerViewModel : ViewModel() {
     }
 
     fun unsubscribe(subscriptionId: String) {
-        val cookie = requireCookie() ?: return
+        if (requireCookie() == null) return
         viewModelScope.launch {
             try {
+                val cookie = requireFreshCookie() ?: return@launch
                 api.unsubscribe(cookie, subscriptionId)
                 _uiState.update {
                     it.copy(
@@ -1104,6 +1133,9 @@ class PlayerViewModel : ViewModel() {
             it.copy(isLoading = false, isSignedIn = true, accountEmail = email, error = null)
         }
         refreshAccountUi()
+        // Fresh cookies sometimes need one SIDTS rotate before browse works.
+        runCatching { auth.refreshSessionCookies() }
+        NewPipeDownloader.setAuthCookie(auth.session?.cookie)
         refreshLibrary()
         _uiState.value.currentTrack?.let { refreshTrackMeta(it) }
     }
@@ -1124,6 +1156,15 @@ class PlayerViewModel : ViewModel() {
         if (cookie == null) {
             _uiState.update { it.copy(error = "Сначала войдите через Google-аккаунт") }
         }
+        return cookie
+    }
+
+    /** Rotate SIDTS if needed, then return a cookie usable for InnerTube. */
+    private suspend fun requireFreshCookie(): String? {
+        val base = requireCookie() ?: return null
+        val refreshed = runCatching { auth.refreshSessionCookies() }.getOrNull()
+        val cookie = refreshed?.cookie ?: base
+        NewPipeDownloader.setAuthCookie(cookie)
         return cookie
     }
 

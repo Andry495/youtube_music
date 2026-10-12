@@ -52,17 +52,6 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-    private val accountChooserLauncher =
-        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-            if (result.resultCode != RESULT_OK) {
-                viewModel.onAuthorizationCancelled()
-                return@registerForActivityResult
-            }
-            val email = viewModel.emailFromChooser(result.data)
-            pendingLoginEmail = email
-            youtubeLoginLauncher.launch(viewModel.loginIntent(email))
-        }
-
     private val youtubeLoginLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
             if (result.resultCode == RESULT_OK) {
@@ -131,7 +120,13 @@ class MainActivity : ComponentActivity() {
                     onTrackClick = viewModel::playTrackAt,
                     onShuffle = viewModel::toggleShuffle,
                     onRepeat = viewModel::cycleRepeat,
-                    onSignIn = { accountChooserLauncher.launch(viewModel.accountChooserIntent()) },
+                    onSignIn = {
+                        // Go straight to WebView login. AccountManager chooser is flaky on
+                        // Android 11+ (package visibility) and is unnecessary — Google UI
+                        // already lists accounts on the device.
+                        pendingLoginEmail = null
+                        youtubeLoginLauncher.launch(viewModel.loginIntent(null))
+                    },
                     onSignOut = viewModel::signOut,
                     onSelectMainTab = viewModel::selectMainTab,
                     onRefreshLibrary = viewModel::refreshLibrary,

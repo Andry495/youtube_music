@@ -1156,11 +1156,9 @@ class YoutubeLibraryApi {
     ): JSONObject {
         val body = JSONObject(payload.toString()).put("context", clientContext(client))
         val origin = ORIGIN
-        val sapisid = extractCookieValue(cookie, "__Secure-3PAPISID")
-            ?: extractCookieValue(cookie, "SAPISID")
+        val sessionCookie = ensureSapisidCookie(cookie)
+        val authorization = buildSapisidAuthorization(sessionCookie, origin)
             ?: throw IllegalStateException("Нет SAPISID в сессии — войдите снова")
-        val ts = (System.currentTimeMillis() / 1000L).toString()
-        val hash = sha1Hex("$ts $sapisid $origin")
         val key = when (client) {
             ClientType.ANDROID, ClientType.ANDROID_VR -> ANDROID_API_KEY
             ClientType.IOS, ClientType.VISIONOS -> IOS_API_KEY
@@ -1169,8 +1167,8 @@ class YoutubeLibraryApi {
 
         val request = Request.Builder()
             .url("$INNERTUBE_BASE/$path?key=$key&prettyPrint=false")
-            .header("Cookie", cookie)
-            .header("Authorization", "SAPISIDHASH ${ts}_$hash")
+            .header("Cookie", sessionCookie)
+            .header("Authorization", authorization)
             .header("X-Origin", origin)
             .header("Origin", origin)
             .header("Referer", "$origin/")
@@ -1182,6 +1180,21 @@ class YoutubeLibraryApi {
             .build()
 
         return clientHttp(request)
+    }
+
+    /** Classic InnerTube auth header — keep it simple to avoid HTTP 400. */
+    private fun buildSapisidAuthorization(cookie: String, origin: String): String? {
+        val sapisid = extractCookieValue(cookie, "SAPISID")
+            ?: extractCookieValue(cookie, "__Secure-3PAPISID")
+            ?: return null
+        val ts = (System.currentTimeMillis() / 1000L).toString()
+        return "SAPISIDHASH ${ts}_${sha1Hex("$ts $sapisid $origin")}"
+    }
+
+    private fun ensureSapisidCookie(cookie: String): String {
+        if (extractCookieValue(cookie, "SAPISID") != null) return cookie
+        val from3p = extractCookieValue(cookie, "__Secure-3PAPISID") ?: return cookie
+        return "SAPISID=$from3p; $cookie"
     }
 
     /** Public playlist/channel browse without login cookies. */
@@ -1204,7 +1217,12 @@ class YoutubeLibraryApi {
         http().newCall(request).execute().use { response ->
             val text = response.body?.string().orEmpty()
             if (!response.isSuccessful) {
-                throw IllegalStateException(parseError(response.code, text))
+                val detail = parseError(response.code, text)
+                android.util.Log.w(
+                    "YoutubeLibraryApi",
+                    "HTTP ${response.code} ${request.url.encodedPath}: $detail body=${text.take(300)}"
+                )
+                throw IllegalStateException(detail)
             }
             if (text.isBlank()) return JSONObject()
             return JSONObject(text)
@@ -1476,8 +1494,8 @@ class YoutubeLibraryApi {
 
     companion object {
         private const val ORIGIN = "https://www.youtube.com"
-        // www.youtube.com SNI is DPI-blocked on many RU ISPs; googleapis endpoint is not.
-        private const val INNERTUBE_BASE = "https://youtubei.googleapis.com/youtubei/v1"
+        // Host MUST match Origin for SAPISIDHASH (XD3). googleapis + youtube Origin → HTTP 400.
+        private const val INNERTUBE_BASE = "https://www.youtube.com/youtubei/v1"
         private const val CLIENT_VERSION = "2.20260120.01.00"
         private const val WEB_API_KEY = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
         private const val ANDROID_API_KEY = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vzqGEJrZs"

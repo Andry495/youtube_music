@@ -53,6 +53,12 @@ class YoutubeVoiceApp : Application(), ImageLoaderFactory {
         org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor
             .setFetchIosClient(true)
         NewPipeDownloader.setAuthCookie(googleAuth.session?.cookie)
+        appScope.launch {
+            runCatching {
+                val refreshed = googleAuth.refreshSessionCookies()
+                NewPipeDownloader.setAuthCookie(refreshed?.cookie ?: googleAuth.session?.cookie)
+            }
+        }
         createNotificationChannel()
     }
 

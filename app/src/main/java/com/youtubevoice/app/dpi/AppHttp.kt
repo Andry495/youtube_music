@@ -37,8 +37,8 @@ object AppHttp {
         if (!dpiBypassOn.get()) return url
         val host = url.host
         return when {
-            host == "www.youtube.com" && url.encodedPath.startsWith("/youtubei/") ->
-                url.newBuilder().host("youtubei.googleapis.com").build()
+            // Keep Host aligned with Origin (www.youtube.com) for SAPISIDHASH / XD3.
+            url.encodedPath.startsWith("/youtubei/") -> url
             host == "www.youtube.com" || host == "m.youtube.com" ->
                 url.newBuilder().host("youtube.com").build()
             else -> url

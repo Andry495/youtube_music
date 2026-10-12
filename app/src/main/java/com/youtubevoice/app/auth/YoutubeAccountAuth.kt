@@ -7,8 +7,10 @@ import android.webkit.CookieManager
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicReference
 
 private val Context.youtubeSessionStore by preferencesDataStore("youtube_session")
@@ -39,7 +41,7 @@ class YoutubeAccountAuth(private val appContext: Context) {
         }
     }
 
-    /** System account chooser — user picks which Google account to use. */
+    /** System account chooser — optional hint before WebView login. */
     @Suppress("DEPRECATION")
     fun accountChooserIntent(): Intent =
         AccountManager.newChooseAccountIntent(
@@ -59,8 +61,8 @@ class YoutubeAccountAuth(private val appContext: Context) {
         YoutubeLoginActivity.createIntent(appContext, email)
 
     suspend fun persistSession(email: String?, cookie: String): YoutubeSession {
-        val cleaned = cookie.trim()
-        require(cleaned.contains("SAPISID") || cleaned.contains("__Secure-3PAPISID")) {
+        val cleaned = YoutubeLoginActivity.normalizeSessionCookie(cookie.trim())
+        require(YoutubeLoginActivity.isLoggedInCookie(cleaned)) {
             "Сессия YouTube неполная — повторите вход"
         }
         val session = YoutubeSession(email = email, cookie = cleaned)
@@ -70,6 +72,19 @@ class YoutubeAccountAuth(private val appContext: Context) {
             prefs[KEY_COOKIE] = cleaned
         }
         return session
+    }
+
+    /**
+     * Refresh `__Secure-*PSIDTS` freshness cookies so InnerTube keeps treating
+     * the session as logged-in after idle periods.
+     */
+    suspend fun refreshSessionCookies(): YoutubeSession? {
+        val current = sessionRef.get() ?: return null
+        val rotated = withContext(Dispatchers.IO) {
+            YoutubeCookieRotator.rotateIfNeeded(current.cookie)
+        }
+        if (rotated == current.cookie) return current
+        return persistSession(current.email, rotated)
     }
 
     suspend fun signOut() {

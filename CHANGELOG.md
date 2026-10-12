@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.6.1 — 2026-10-12
+
+- **Вход Google:** прямой WebView (без хрупкого AccountManager chooser); continue на `www.youtube.com`
+- Не открываем внешние `intent://` во время логина — после 2FA снова возвращаемся в приложение
+- Ждём полный набор cookie (SAPISID + SID) и нормализуем `SAPISID` из `__Secure-3PAPISID`
+- **InnerTube:** Host = Origin (`www.youtube.com/youtubei/v1`) — убран 400 `Origin doesn't match Host for XD3`
+- DPI больше не переписывает `/youtubei/` на `youtubei.googleapis.com`
+- Ротация `__Secure-*PSIDTS` через `RotateCookies` при старте и перед запросами библиотеки
+- Документация: [docs/AUTH.md](docs/AUTH.md)
+
 ## 1.6.0 — 2026-10-09
 
 - **Окно докачки от позиции:** качаем то, что ещё играть (back-buffer ~30 с), затем следующие треки до лимита кэша или числа «треков вперёд»

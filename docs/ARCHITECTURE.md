@@ -27,9 +27,9 @@
 
 ### Auth (`auth/`)
 
-- Выбор аккаунта через `AccountManager`
-- `YoutubeLoginActivity` — WebView, cookie-сессия
-- `YoutubeAccountAuth` — DataStore (`SAPISID` / `__Secure-3PAPISID`)
+- `YoutubeLoginActivity` — WebView → Google login → `www.youtube.com`, опрос cookie (см. [AUTH.md](AUTH.md))
+- `YoutubeAccountAuth` / `YoutubeSessionCookies` — DataStore; `YoutubeCookieRotator` обновляет `*PSIDTS`
+- InnerTube (auth): `www.youtube.com/youtubei/v1` + `SAPISIDHASH` (Host должен совпадать с Origin)
 
 ### Плеер (`player/`)
 
